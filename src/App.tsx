@@ -43,6 +43,7 @@ import {
   resolveObjectGeometryIndex,
 } from '@/lib/object-geometry'
 import { errorColor } from '@/lib/error-palette'
+import { semanticSurfaceColor } from '@/lib/semantic-surface-colors'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Input } from '@/components/ui/input'
@@ -4320,30 +4321,6 @@ function formatValue(value: unknown) {
   }
 
   return String(value)
-}
-
-function semanticSurfaceColor(surfaceType: string) {
-  const paletteByType: Record<string, string> = {
-    groundsurface: '#65a30d',
-    wallsurface: '#94a3b8',
-    roofsurface: '#ef4444',
-    closuresurface: '#a855f7',
-    outerceilingsurface: '#ec4899',
-    outerfloorsurface: '#14b8a6',
-    interiorwallsurface: '#60a5fa',
-    interiorceilingsurface: '#f472b6',
-    interiorfloorsurface: '#10b981',
-  }
-
-  const key = surfaceType.trim().toLowerCase()
-  const matched = paletteByType[key]
-  if (matched) {
-    return matched
-  }
-
-  const fallbackPalette = ['#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#f97316', '#ec4899']
-  const hash = [...key].reduce((sum, character) => sum + character.charCodeAt(0), 0)
-  return fallbackPalette[hash % fallbackPalette.length]
 }
 
 function getVal3dityErrorUrl(error: ViewerValidationError) {

@@ -25,6 +25,7 @@ import {
   resolveObjectGeometryIndex,
 } from '@/lib/object-geometry'
 import { errorColor } from '@/lib/error-palette'
+import { semanticSurfaceColor } from '@/lib/semantic-surface-colors'
 
 type Theme = 'light' | 'dark'
 
@@ -112,37 +113,6 @@ const FALLBACK_OBJECT_TYPE_COLORS: Record<Theme, readonly string[]> = {
   light: ['#8b96a1', '#938c81', '#879672', '#7e97a3', '#998b9f'],
   dark: ['#7f8b97', '#827b72', '#788a67', '#728b98', '#887c93'],
 }
-
-const SEMANTIC_SURFACE_COLORS: Record<string, string> = {
-  roofsurface: '#c65a3a',
-  groundsurface: '#6f9d4b',
-  wallsurface: '#a7adb5',
-  closuresurface: '#7d8fa3',
-  outerceilingsurface: '#8aa5c9',
-  outerfloorsurface: '#6ea892',
-  window: '#55b7cf',
-  door: '#b8793f',
-  interiorwallsurface: '#b9a7c8',
-  ceilingsurface: '#c1bdd3',
-  floorsurface: '#b99b72',
-  watersurface: '#3f8fc5',
-  watergroundsurface: '#4c7f90',
-  waterclosuresurface: '#4aa2a0',
-  trafficarea: '#6f7680',
-  auxiliarytrafficarea: '#8f9568',
-  transportationmarking: '#d4b84a',
-  transportationhole: '#3f454d',
-}
-
-const FALLBACK_SEMANTIC_SURFACE_COLORS = [
-  '#c68b3f',
-  '#70a95b',
-  '#4da6b6',
-  '#668fc2',
-  '#9a7fbd',
-  '#bd6d93',
-  '#8f9a57',
-] as const
 
 type CityViewportProps = {
   data: ViewerDataset | null
@@ -2995,17 +2965,6 @@ function buildMaterialArray(
     materials.push(color ? createGroupMaterial(color) : baseMaterial)
   }
   return materials
-}
-
-function semanticSurfaceColor(surfaceType: string) {
-  const key = surfaceType.trim().toLowerCase()
-  const matched = SEMANTIC_SURFACE_COLORS[key]
-  if (matched) {
-    return matched
-  }
-
-  const hash = [...key].reduce((sum, character) => sum + character.charCodeAt(0), 0)
-  return FALLBACK_SEMANTIC_SURFACE_COLORS[hash % FALLBACK_SEMANTIC_SURFACE_COLORS.length]
 }
 
 function objectKey(featureId: string, objectId: string) {
