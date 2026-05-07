@@ -36,6 +36,7 @@ const VIEWPORT_FOG_DENSITY = {
 
 const PLANARITY_DISTANCE_TOLERANCE = 0.0001
 const PLANARITY_RELATIVE_TOLERANCE = 1e-7
+const EDIT_VERTEX_PICK_RADIUS_PIXELS = 14
 
 const OBJECT_TYPE_COLORS: Record<Theme, Record<string, string>> = {
   light: {
@@ -531,58 +532,13 @@ function CityViewport({
         const pickingMode = pickingModeRef.current
 
         if (selection.editMode && pickingMode === 'vertex') {
-          updateEditPointRaycastThreshold(activeRuntime, currentData, selection)
-          const handleTargets = [activeRuntime.selectedEditPoint, activeRuntime.editPoints].filter(
-            (entry): entry is THREE.Points => entry != null,
+          const nearestVertexIndex = findNearestEditVertexIndexOnScreen(
+            activeRuntime,
+            currentData,
+            selection,
+            event,
+            hideOccludedEditEdgesRef.current,
           )
-          const handleHits = activeRuntime.raycaster.intersectObjects(handleTargets, false)
-          const handleHit = handleHits[0]
-          if (handleHit && typeof handleHit.index === 'number') {
-            const indices = (handleHit.object.userData.vertexIndices as number[] | undefined) ?? []
-            const vertexIndex = indices[handleHit.index]
-            if (vertexIndex != null) {
-              onSelectVertexRef.current(vertexIndex)
-              return
-            }
-          }
-
-          if (handleHit) {
-            return
-          }
-
-          const activeFeature =
-            selection.selectedFeatureId
-              ? currentData.features.find((candidate) => candidate.id === selection.selectedFeatureId) ?? null
-              : null
-          const activeObject =
-            activeFeature?.objects.find((candidate) => candidate.id === selection.activeObjectId) ?? null
-          const activeObjectGeometry = activeFeature && activeObject
-            ? resolveDisplayedObjectGeometry(activeFeature, activeObject, selection)
-            : null
-          const activeMesh =
-            selection.selectedFeatureId && selection.activeObjectId
-              ? activeRuntime.meshesByObjectKey.get(
-                  objectKey(selection.selectedFeatureId, selection.activeObjectId),
-                ) ?? null
-              : null
-
-          if (!activeFeature || !activeObject || !activeObjectGeometry || !activeMesh) {
-            return
-          }
-
-          const meshHits = activeRuntime.raycaster.intersectObject(activeMesh, false)
-          const meshHit = meshHits[0]
-          const triangleFaceIndices = (activeMesh.userData.triangleFaceIndices as TriangleFaceIndices | undefined) ?? []
-          const polygonIndex =
-            meshHit && typeof meshHit.faceIndex === 'number'
-              ? triangleFaceIndices[meshHit.faceIndex] ?? null
-              : null
-          const polygon = polygonIndex != null ? activeObjectGeometry.polygons[polygonIndex] ?? null : null
-          const nearestVertexIndex =
-            meshHit && polygon
-              ? findNearestVertexIndexOnPolygon(meshHit.point, polygon, activeFeature.vertices, currentData.center)
-              : null
-
           if (nearestVertexIndex != null) {
             onSelectVertexRef.current(nearestVertexIndex)
           }
@@ -2276,37 +2232,6 @@ function updatePointPositions(
   points.geometry.computeBoundingSphere()
 }
 
-function updateEditPointRaycastThreshold(
-  runtime: Runtime,
-  data: ViewerDataset,
-  selection: ViewSelection,
-) {
-  const feature = selection.selectedFeatureId
-    ? data.features.find((candidate) => candidate.id === selection.selectedFeatureId)
-    : null
-  const object = feature?.objects.find((candidate) => candidate.id === selection.activeObjectId) ?? null
-  const objectGeometry = feature && object
-    ? resolveDisplayedObjectGeometry(feature, object, selection)
-    : null
-  if (!feature || !objectGeometry) {
-    runtime.raycaster.params.Points.threshold = 1
-    return
-  }
-
-  const objectExtent = extentFromVertexIndices(objectGeometry.vertexIndices, feature.vertices)
-  const viewportHeight = runtime.renderer.domElement.clientHeight
-  if (!objectExtent || viewportHeight <= 0) {
-    runtime.raycaster.params.Points.threshold = 1
-    return
-  }
-
-  const center = localCenterFromExtent(objectExtent, data.center)
-  const distance = runtime.camera.position.distanceTo(center)
-  const fovRadians = THREE.MathUtils.degToRad(runtime.camera.fov)
-  const worldUnitsPerPixel = (2 * Math.tan(fovRadians / 2) * distance) / viewportHeight
-  runtime.raycaster.params.Points.threshold = Math.max(worldUnitsPerPixel * 8, 0.05)
-}
-
 function clearEditPointOverlays(runtime: Runtime) {
   if (runtime.editPoints) {
     runtime.editPoints.geometry.dispose()
@@ -3144,34 +3069,95 @@ function lensDistanceScale(verticalFovDegrees: number) {
   return Math.tan(referenceFovRadians / 2) / Math.tan(currentFovRadians / 2)
 }
 
-function findNearestVertexIndexOnPolygon(
-  hitPoint: THREE.Vector3,
-  polygon: PolygonRings,
-  vertices: Vec3[],
-  dataCenter: Vec3,
+function findNearestEditVertexIndexOnScreen(
+  runtime: Runtime,
+  data: ViewerDataset,
+  selection: ViewSelection,
+  event: MouseEvent,
+  respectOcclusion: boolean,
 ) {
-  let nearestVertexIndex: number | null = null
-  let nearestDistanceSquared = Number.POSITIVE_INFINITY
+  if (!selection.selectedFeatureId || !selection.activeObjectId) {
+    return null
+  }
 
-  for (const vertexIndex of uniqueVertexIndices(polygon)) {
-    const vertex = vertices[vertexIndex]
+  const feature = data.features.find((candidate) => candidate.id === selection.selectedFeatureId) ?? null
+  const object = feature?.objects.find((candidate) => candidate.id === selection.activeObjectId) ?? null
+  const objectGeometry = feature && object
+    ? resolveDisplayedObjectGeometry(feature, object, selection)
+    : null
+  const draftVertices = runtime.featureDrafts.get(selection.selectedFeatureId)
+  if (!objectGeometry || !draftVertices) {
+    return null
+  }
+
+  const rect = runtime.renderer.domElement.getBoundingClientRect()
+  if (rect.width <= 0 || rect.height <= 0) {
+    return null
+  }
+
+  const pointerX = event.clientX - rect.left
+  const pointerY = event.clientY - rect.top
+  const radiusSquared = EDIT_VERTEX_PICK_RADIUS_PIXELS * EDIT_VERTEX_PICK_RADIUS_PIXELS
+  const scenePoint = new THREE.Vector3()
+  const projectedPoint = new THREE.Vector3()
+  const candidates: Array<{
+    vertexIndex: number
+    distanceSquared: number
+    scenePoint: THREE.Vector3
+  }> = []
+
+  for (const vertexIndex of objectGeometry.vertexIndices) {
+    const vertex = draftVertices[vertexIndex]
     if (!vertex) {
       continue
     }
 
-    const localVertex = new THREE.Vector3(
-      vertex[0] - dataCenter[0],
-      vertex[1] - dataCenter[1],
-      vertex[2] - dataCenter[2],
+    scenePoint.set(
+      vertex[0] - data.center[0],
+      vertex[1] - data.center[1],
+      vertex[2] - data.center[2],
     )
-    const distanceSquared = localVertex.distanceToSquared(hitPoint)
-    if (distanceSquared < nearestDistanceSquared) {
-      nearestDistanceSquared = distanceSquared
-      nearestVertexIndex = vertexIndex
+    projectedPoint.copy(scenePoint).project(runtime.camera)
+    if (projectedPoint.z < -1 || projectedPoint.z > 1) {
+      continue
+    }
+
+    const screenX = (projectedPoint.x * 0.5 + 0.5) * rect.width
+    const screenY = (-projectedPoint.y * 0.5 + 0.5) * rect.height
+    const dx = screenX - pointerX
+    const dy = screenY - pointerY
+    const distanceSquared = dx * dx + dy * dy
+    if (distanceSquared <= radiusSquared) {
+      candidates.push({
+        vertexIndex,
+        distanceSquared,
+        scenePoint: scenePoint.clone(),
+      })
     }
   }
 
-  return nearestVertexIndex
+  candidates.sort((left, right) => left.distanceSquared - right.distanceSquared)
+  for (const candidate of candidates) {
+    if (!respectOcclusion || isScenePointVisibleFromCamera(runtime, candidate.scenePoint)) {
+      return candidate.vertexIndex
+    }
+  }
+
+  return null
+}
+
+function isScenePointVisibleFromCamera(runtime: Runtime, scenePoint: THREE.Vector3) {
+  const ndc = scenePoint.clone().project(runtime.camera)
+  const raycaster = new THREE.Raycaster()
+  raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), runtime.camera)
+  const hits = raycaster.intersectObjects(getVisibleObjectMeshes(runtime), false)
+  if (hits.length === 0) {
+    return true
+  }
+
+  const candidateDistance = runtime.camera.position.distanceTo(scenePoint)
+  const tolerance = Math.max(runtime.sceneScale * 1e-6, 0.01)
+  return hits[0].distance >= candidateDistance - tolerance
 }
 
 function updateCameraClipping(runtime: Runtime) {
