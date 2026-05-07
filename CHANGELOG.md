@@ -11,6 +11,7 @@
 - Fix bug that caused mis-indexed triangulations in some datasets
 - Add hotkey 'D' in inspect mode to delete the selected face
 - Improve vertex selection in inspect mode
+- Add system setting to light/dark mode button
 
 ## 0.5.0 - 2026-05-04
 
