@@ -25,6 +25,7 @@ import {
   Search,
   SquareMousePointer,
   Sun,
+  SunMoon,
   TableProperties,
   Upload,
   X,
@@ -52,6 +53,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import type { ThemeMode } from '@/components/theme-context'
 import { useTheme } from '@/components/use-theme'
 import cubeIconUrl from '@/assets/blender-icons/cube.svg'
 import editModeIconUrl from '@/assets/blender-icons/editmode_hlt.svg'
@@ -186,7 +188,7 @@ function App() {
     surface: ViewerSemanticSurface | null
   } | null>(null)
   const dragCountRef = useRef(0)
-  const { theme, toggleTheme } = useTheme()
+  const { theme, themeMode, toggleTheme } = useTheme()
 
   const featureMap = useMemo(() => {
     return new Map(dataset?.features.map((feature) => [feature.id, feature]) ?? [])
@@ -1672,10 +1674,14 @@ function App() {
                 size="icon"
                 variant="ghost"
                 onClick={toggleTheme}
-                aria-label="Toggle theme"
-                title="Toggle theme"
+                aria-label={`Theme: ${getThemeModeLabel(themeMode)}`}
+                title={`Theme: ${getThemeModeLabel(themeMode)}`}
               >
-                {theme === 'dark' ? <Sun className="size-4" /> : <Moon className="size-4" />}
+                {themeMode === 'system'
+                  ? <SunMoon className="size-4" />
+                  : themeMode === 'dark'
+                    ? <Moon className="size-4" />
+                    : <Sun className="size-4" />}
               </Button>
               <Button
                 size="icon"
@@ -4466,6 +4472,17 @@ function getPickingModeDescription(mode: ViewerPickingMode) {
       return 'Pick face'
     case 'vertex':
       return 'Pick vertex'
+  }
+}
+
+function getThemeModeLabel(themeMode: ThemeMode) {
+  switch (themeMode) {
+    case 'light':
+      return 'Light'
+    case 'dark':
+      return 'Dark'
+    case 'system':
+      return 'Auto'
   }
 }
 

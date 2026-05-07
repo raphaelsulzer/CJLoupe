@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 
-import { ThemeContext, type Theme } from '@/components/theme-context'
+import { ThemeContext, type Theme, type ThemeMode } from '@/components/theme-context'
 
 const STORAGE_KEY = 'cjloupe-theme'
 const MEDIA_QUERY = '(prefers-color-scheme: dark)'
@@ -8,17 +8,21 @@ const THEME_CHANGING_CLASS = 'theme-changing'
 
 let themeTransitionCleanupFrame: number | null = null
 
-function getStoredTheme(): Theme | null {
+function getStoredThemeMode(): ThemeMode | null {
   const stored = localStorage.getItem(STORAGE_KEY)
-  return stored === 'light' || stored === 'dark' ? stored : null
+  return stored === 'light' || stored === 'dark' || stored === 'system' ? stored : null
 }
 
 function getSystemTheme(): Theme {
   return window.matchMedia(MEDIA_QUERY).matches ? 'dark' : 'light'
 }
 
-function getInitialTheme(): Theme {
-  return getStoredTheme() ?? getSystemTheme()
+function getInitialThemeMode(): ThemeMode {
+  return getStoredThemeMode() ?? 'system'
+}
+
+function resolveTheme(themeMode: ThemeMode, systemTheme: Theme) {
+  return themeMode === 'system' ? systemTheme : themeMode
 }
 
 function suppressTransitionsDuringThemeChange(root: HTMLElement) {
@@ -44,43 +48,51 @@ function applyTheme(theme: Theme) {
 }
 
 function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setTheme] = useState<Theme>(getInitialTheme)
-  const [hasStoredPreference, setHasStoredPreference] = useState(() => getStoredTheme() != null)
+  const [themeMode, setThemeMode] = useState<ThemeMode>(getInitialThemeMode)
+  const [systemTheme, setSystemTheme] = useState<Theme>(getSystemTheme)
+  const theme = resolveTheme(themeMode, systemTheme)
 
   useEffect(() => {
     applyTheme(theme)
-    if (hasStoredPreference) {
-      localStorage.setItem(STORAGE_KEY, theme)
-    } else {
-      localStorage.removeItem(STORAGE_KEY)
-    }
-  }, [hasStoredPreference, theme])
+  }, [theme])
 
   useEffect(() => {
-    if (hasStoredPreference) {
+    if (themeMode === 'system') {
+      localStorage.removeItem(STORAGE_KEY)
       return
     }
 
+    localStorage.setItem(STORAGE_KEY, themeMode)
+  }, [themeMode])
+
+  useEffect(() => {
     const mediaQuery = window.matchMedia(MEDIA_QUERY)
-    const handleChange = () => setTheme(getSystemTheme())
+    const handleChange = () => setSystemTheme(getSystemTheme())
     mediaQuery.addEventListener('change', handleChange)
     return () => mediaQuery.removeEventListener('change', handleChange)
-  }, [hasStoredPreference])
+  }, [])
+
+  const setTheme = useCallback((nextTheme: Theme) => {
+    setThemeMode(nextTheme)
+  }, [])
 
   const toggleTheme = useCallback(() => {
-    setHasStoredPreference(true)
-    setTheme((current) => {
-      return current === 'dark' ? 'light' : 'dark'
+    setThemeMode((current) => {
+      if (current === 'light') return 'dark'
+      if (current === 'dark') return 'system'
+      return 'light'
     })
   }, [])
 
   const value = useMemo(
     () => ({
       theme,
+      themeMode,
       setTheme,
+      setThemeMode,
       toggleTheme,
     }),
-    [theme, toggleTheme],
+    [setTheme, theme, themeMode, toggleTheme],
   )
 
   return (
