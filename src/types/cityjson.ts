@@ -82,6 +82,7 @@ export interface ViewerObjectGeometry {
   lod: string | null
   polygons: PolygonRings[]
   semanticSurfaces: Array<ViewerSemanticSurface | null>
+  sourceFaceIndices: number[]
   vertexIndices: number[]
 }
 

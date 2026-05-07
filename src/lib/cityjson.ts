@@ -683,6 +683,7 @@ function extractRenderableGeometries(geometries: CityJsonGeometry[]) {
       lod: geometry.lod ?? null,
       polygons,
       semanticSurfaces,
+      sourceFaceIndices: polygons.map((_, polygonIndex) => polygonIndex),
       vertexIndices: uniqueVertexIndices(polygons),
     } satisfies ViewerObjectGeometry]
   })

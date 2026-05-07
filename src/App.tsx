@@ -75,6 +75,7 @@ import {
 } from '@/lib/cityjson'
 import { cn } from '@/lib/utils'
 import type {
+  PolygonRings,
   Vec3,
   ViewerCityObject,
   ViewerDataset,
@@ -130,6 +131,7 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const annotationInputRef = useRef<HTMLInputElement>(null)
   const originalVerticesRef = useRef<Map<string, Vec3[]>>(new Map())
+  const originalObjectGeometriesRef = useRef<Map<string, Map<string, ViewerObjectGeometry[]>>>(new Map())
   const preInspectPickingModeRef = useRef<ViewerPickingMode>('object')
   const inspectPickingModeRef = useRef<ViewerPickingMode>('face')
 
@@ -716,9 +718,8 @@ function App() {
   }, [])
 
   const applyDataset = useCallback((nextDataset: ViewerDataset) => {
-    originalVerticesRef.current = new Map(
-      nextDataset.features.map((feature) => [feature.id, cloneVertices(feature.vertices)]),
-    )
+    originalVerticesRef.current = new Map()
+    originalObjectGeometriesRef.current = new Map()
     resetViewerState()
     setDataset(nextDataset)
 
@@ -971,15 +972,25 @@ function App() {
       setShowSemanticSurfaces(false)
     }
 
-    setSelectedFaceIndex(error.faceIndex)
-    setSelectedFaceRingIndex(0)
     setActiveObjectId(inferredObjectId)
+    const normalizedErrorGeometryIndex = inferredObjectId
+      ? normalizeObjectGeometryIndex(
+          selectedFeature.objects.find((object) => object.id === inferredObjectId) ?? null,
+          error.geometryIndex,
+        )
+      : null
+    const errorObject = selectedFeature.objects.find((object) => object.id === inferredObjectId) ?? null
+    const errorGeometry = getObjectGeometryByIndex(errorObject, normalizedErrorGeometryIndex)
+    const currentErrorFaceIndex =
+      error.faceIndex != null && errorGeometry
+        ? getCurrentFaceIndexForSourceFace(errorGeometry, error.faceIndex)
+        : null
+
+    setSelectedFaceIndex(currentErrorFaceIndex)
+    setSelectedFaceRingIndex(0)
     setActiveGeometryIndex(
       inferredObjectId
-        ? normalizeObjectGeometryIndex(
-            selectedFeature.objects.find((object) => object.id === inferredObjectId) ?? null,
-            error.geometryIndex,
-          )
+        ? normalizedErrorGeometryIndex
         : null,
     )
     setSelectedVertexIndex(null)
@@ -990,7 +1001,7 @@ function App() {
       featureId: selectedFeature.id,
       objectId: inferredObjectId,
       geometryIndex: error.geometryIndex,
-      faceIndex: error.faceIndex,
+      faceIndex: currentErrorFaceIndex,
       location: error.location,
       preserveCameraOffset: editMode,
     })
@@ -1228,6 +1239,9 @@ function App() {
 
       const feature = current.features.find((candidate) => candidate.id === featureId)
       if (feature) {
+        if (!originalVerticesRef.current.has(featureId)) {
+          originalVerticesRef.current.set(featureId, cloneVertices(feature.vertices))
+        }
         feature.vertices = cloneVertices(vertices)
       }
 
@@ -1236,20 +1250,143 @@ function App() {
     setGeometryRevision((current) => current + 1)
   }, [])
 
+  const deleteSelectedFace = useCallback(() => {
+    if (
+      !selectedFeatureId ||
+      !activeObjectId ||
+      resolvedActiveGeometryIndex == null ||
+      selectedFaceIndex == null ||
+      !activeObjectGeometry?.polygons[selectedFaceIndex]
+    ) {
+      return
+    }
+
+    setDataset((current) => {
+      if (!current) {
+        return current
+      }
+
+      return {
+        ...current,
+        features: current.features.map((feature) => {
+          if (feature.id !== selectedFeatureId) {
+            return feature
+          }
+
+          return {
+            ...feature,
+            objects: feature.objects.map((object) => {
+              if (object.id !== activeObjectId) {
+                return object
+              }
+
+              const targetGeometry = object.geometries.find(
+                (geometry) => geometry.index === resolvedActiveGeometryIndex,
+              )
+              if (!targetGeometry?.polygons[selectedFaceIndex]) {
+                return object
+              }
+
+              let featureGeometrySnapshots = originalObjectGeometriesRef.current.get(selectedFeatureId)
+              if (!featureGeometrySnapshots) {
+                featureGeometrySnapshots = new Map()
+                originalObjectGeometriesRef.current.set(selectedFeatureId, featureGeometrySnapshots)
+              }
+              if (!featureGeometrySnapshots.has(object.id)) {
+                featureGeometrySnapshots.set(object.id, cloneObjectGeometries(object.geometries))
+              }
+
+              return {
+                ...object,
+                geometries: object.geometries.map((geometry) => {
+                  if (
+                    geometry.index !== resolvedActiveGeometryIndex ||
+                    !geometry.polygons[selectedFaceIndex]
+                  ) {
+                    return geometry
+                  }
+
+                  const polygons = geometry.polygons.filter((_, index) => index !== selectedFaceIndex)
+                  const semanticSurfaces = geometry.semanticSurfaces.filter((_, index) => index !== selectedFaceIndex)
+                  const sourceFaceIndices = geometry.sourceFaceIndices.filter((_, index) => index !== selectedFaceIndex)
+
+                  return {
+                    ...geometry,
+                    polygons,
+                    semanticSurfaces,
+                    sourceFaceIndices,
+                    vertexIndices: collectGeometryVertexIndices(polygons),
+                  }
+                }),
+              }
+            }),
+          }
+        }),
+      }
+    })
+
+    setSelectedFaceIndex(null)
+    setSelectedFaceRingIndex(0)
+    setSelectedVertexIndex(null)
+    setSelectedFaceVertexEntryIndex(null)
+    setSelectedSemanticSurface(null)
+    setGeometryRevision((current) => current + 1)
+  }, [
+    activeObjectGeometry,
+    activeObjectId,
+    resolvedActiveGeometryIndex,
+    selectedFaceIndex,
+    selectedFeatureId,
+  ])
+
   const restoreSelectedFeatureGeometry = useCallback(() => {
     if (!selectedFeatureId) {
       return
     }
 
     const originalVertices = originalVerticesRef.current.get(selectedFeatureId)
-    if (!originalVertices) {
+    const originalObjectGeometries = originalObjectGeometriesRef.current.get(selectedFeatureId)
+    if (!originalVertices && !originalObjectGeometries) {
       return
     }
 
-    applyFeatureVertices(selectedFeatureId, originalVertices)
+    setDataset((current) => {
+      if (!current) {
+        return current
+      }
+
+      return {
+        ...current,
+        features: current.features.map((feature) => {
+          if (feature.id !== selectedFeatureId) {
+            return feature
+          }
+
+          return {
+            ...feature,
+            vertices: originalVertices ? cloneVertices(originalVertices) : feature.vertices,
+            objects: feature.objects.map((object) => {
+              const geometries = originalObjectGeometries?.get(object.id)
+              if (!geometries) {
+                return object
+              }
+
+              return {
+                ...object,
+                geometries: cloneObjectGeometries(geometries),
+              }
+            }),
+          }
+        }),
+      }
+    })
+    originalVerticesRef.current.delete(selectedFeatureId)
+    originalObjectGeometriesRef.current.delete(selectedFeatureId)
     setSelectedVertexIndex(null)
     setSelectedFaceVertexEntryIndex(null)
-  }, [applyFeatureVertices, selectedFeatureId])
+    setSelectedSemanticSurface(null)
+    setGeometryRevision((current) => current + 1)
+  }, [selectedFeatureId])
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -1331,6 +1468,22 @@ function App() {
 
       if (
         editMode &&
+        event.key.toLowerCase() === 'd' &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey
+      ) {
+        if (selectedFaceIndex == null) {
+          return
+        }
+
+        event.preventDefault()
+        deleteSelectedFace()
+        return
+      }
+
+      if (
+        editMode &&
         event.key.toLowerCase() === 'g' &&
         !event.ctrlKey &&
         !event.metaKey &&
@@ -1342,7 +1495,13 @@ function App() {
       }
 
       if (event.key.toLowerCase() === 'u') {
-        if (!selectedFeatureId || !originalVerticesRef.current.has(selectedFeatureId)) {
+        if (
+          !selectedFeatureId ||
+          (
+            !originalVerticesRef.current.has(selectedFeatureId) &&
+            !originalObjectGeometriesRef.current.has(selectedFeatureId)
+          )
+        ) {
           return
         }
 
@@ -1371,7 +1530,7 @@ function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [centerCurrentSelection, cycleGeometryDisplayMode, cycleSelectedFaceRing, cycleSelectedFaceVertex, dataset, editMode, handlePickingModeShortcut, restoreSelectedFeatureGeometry, selectedFeatureId, toggleEditMode])
+  }, [centerCurrentSelection, cycleGeometryDisplayMode, cycleSelectedFaceRing, cycleSelectedFaceVertex, dataset, deleteSelectedFace, editMode, handlePickingModeShortcut, restoreSelectedFeatureGeometry, selectedFaceIndex, selectedFeatureId, toggleEditMode])
 
   const isErrorDialogVisible = Boolean(error && dismissedErrorMessage !== error)
   const hasModalScrim =
@@ -1420,6 +1579,7 @@ function App() {
           { keys: 'Click', description: getPickingModeDescription(effectivePickingMode) },
           { keys: 'J / K', description: 'Step active ring' },
           { keys: 'R', description: 'Cycle rings' },
+          { keys: 'D', description: 'Delete selected face' },
         ]
       : [
           { keys: 'Click', description: getPickingModeDescription(effectivePickingMode) },
@@ -1974,7 +2134,13 @@ function App() {
               onSelectPickingMode={handleSelectPickingMode}
               onCenterCurrentSelection={centerCurrentSelection}
               onRestoreGeometry={restoreSelectedFeatureGeometry}
-              restoreGeometryDisabled={!selectedFeatureId || !originalVerticesRef.current.has(selectedFeatureId)}
+              restoreGeometryDisabled={
+                !selectedFeatureId ||
+                (
+                  !originalVerticesRef.current.has(selectedFeatureId) &&
+                  !originalObjectGeometriesRef.current.has(selectedFeatureId)
+                )
+              }
             />
           </div>
         )}
@@ -4720,6 +4886,27 @@ function cloneVertices(vertices: Vec3[]) {
   return vertices.map((vertex) => [...vertex] as Vec3)
 }
 
+function cloneObjectGeometries(geometries: ViewerObjectGeometry[]) {
+  return geometries.map((geometry) => ({
+    ...geometry,
+    polygons: clonePolygonRingsList(geometry.polygons),
+    semanticSurfaces: geometry.semanticSurfaces.map((surface) =>
+      surface
+        ? {
+            ...surface,
+            attributes: { ...surface.attributes },
+          }
+        : null,
+    ),
+    sourceFaceIndices: [...geometry.sourceFaceIndices],
+    vertexIndices: [...geometry.vertexIndices],
+  }))
+}
+
+function clonePolygonRingsList(polygons: PolygonRings[]) {
+  return polygons.map((polygon) => polygon.map((ring) => [...ring]))
+}
+
 function formatCoordinateTriple(coordinates: Vec3) {
   return `${coordinates[0].toFixed(3)}, ${coordinates[1].toFixed(3)}, ${coordinates[2].toFixed(3)}`
 }
@@ -4727,6 +4914,27 @@ function formatCoordinateTriple(coordinates: Vec3) {
 function getFaceVertexCycle(rings: number[][] | null, ringIndex: number) {
   const targetRing = rings?.[ringIndex] ?? []
   return [...targetRing]
+}
+
+function collectGeometryVertexIndices(polygons: PolygonRings[]) {
+  const indices = new Set<number>()
+
+  for (const polygon of polygons) {
+    for (const ring of polygon) {
+      for (const index of ring) {
+        if (typeof index === 'number') {
+          indices.add(index)
+        }
+      }
+    }
+  }
+
+  return [...indices].sort((left, right) => left - right)
+}
+
+function getCurrentFaceIndexForSourceFace(geometry: ViewerObjectGeometry, sourceFaceIndex: number) {
+  const currentFaceIndex = geometry.sourceFaceIndices.indexOf(sourceFaceIndex)
+  return currentFaceIndex >= 0 ? currentFaceIndex : null
 }
 
 function isEditableTarget(target: EventTarget | null) {

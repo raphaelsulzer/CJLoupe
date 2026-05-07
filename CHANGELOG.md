@@ -8,6 +8,9 @@
 - Reduce memory usage, allowing for loading of larger CityJSONL files
 - Improve error message for CityJSON files that are too large to load
 - Improve object and semantic surface colors based on types
+- Fix bug that caused mis-indexed triangulations in some datasets
+- Add hotkey 'D' in inspect mode to delete the selected face
+- Improve vertex selection in inspect mode
 
 ## 0.5.0 - 2026-05-04
 

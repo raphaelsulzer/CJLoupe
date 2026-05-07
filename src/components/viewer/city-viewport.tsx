@@ -1099,7 +1099,12 @@ function rebuildFeatureGeometry(
       objectGeometry.polygons,
       vertices,
       center,
-      collectObjectErrorFaceIndices(feature.errors, object.id, objectGeometry.index),
+      collectObjectErrorFaceIndices(
+        feature.errors,
+        object.id,
+        objectGeometry.index,
+        objectGeometry.sourceFaceIndices,
+      ),
     )
     const { faceGroups } = resolveObjectFaceGroups(runtime, feature, object, objectGeometry, selection)
     const nextGeometry = buildGroupedObjectGeometry(nextBlueprint, faceGroups)
@@ -1223,7 +1228,12 @@ function buildObjectMeshPresentation(
     objectGeometry.polygons,
     vertices,
     featureCenter,
-    collectObjectErrorFaceIndices(feature.errors, object.id, objectGeometry.index),
+    collectObjectErrorFaceIndices(
+      feature.errors,
+      object.id,
+      objectGeometry.index,
+      objectGeometry.sourceFaceIndices,
+    ),
   )
   const { faceGroups, groupColors } = resolveObjectFaceGroups(runtime, feature, object, objectGeometry, selection)
   const geometry = buildGroupedObjectGeometry(blueprint, faceGroups)
@@ -1258,13 +1268,14 @@ function resolveObjectFaceGroups(
 
   return runtime.showSemanticSurfaces
     ? computeFaceSemanticGroups(objectGeometry.semanticSurfaces, selectedSemanticFaceIndex)
-    : computeFaceErrorGroups(feature.errors, object.id, objectGeometry.index)
+    : computeFaceErrorGroups(feature.errors, object.id, objectGeometry.index, objectGeometry.sourceFaceIndices)
 }
 
 function collectObjectErrorFaceIndices(
   errors: ViewerValidationError[],
   objectId: string,
   geometryIndex: number,
+  sourceFaceIndices: number[],
 ) {
   const faceIndices = new Set<number>()
 
@@ -1277,7 +1288,10 @@ function collectObjectErrorFaceIndices(
       continue
     }
 
-    faceIndices.add(error.faceIndex)
+    const currentFaceIndex = getCurrentFaceIndexForSourceFace(sourceFaceIndices, error.faceIndex)
+    if (currentFaceIndex != null) {
+      faceIndices.add(currentFaceIndex)
+    }
   }
 
   return faceIndices
@@ -3107,6 +3121,7 @@ function computeFaceErrorGroups(
   errors: ViewerValidationError[],
   objectId: string,
   geometryIndex: number,
+  sourceFaceIndices: number[],
 ): { faceGroups: Map<number, number>; groupColors: Map<number, string> } {
   const codeToGroup = new Map<number, number>()
   let nextGroup = 1
@@ -3121,7 +3136,9 @@ function computeFaceErrorGroups(
     ) {
       continue
     }
-    if (faceGroups.has(error.faceIndex)) {
+
+    const currentFaceIndex = getCurrentFaceIndexForSourceFace(sourceFaceIndices, error.faceIndex)
+    if (currentFaceIndex == null || faceGroups.has(currentFaceIndex)) {
       continue
     }
 
@@ -3131,10 +3148,15 @@ function computeFaceErrorGroups(
       codeToGroup.set(error.code, group)
       groupColors.set(group, errorColor(error.code))
     }
-    faceGroups.set(error.faceIndex, group)
+    faceGroups.set(currentFaceIndex, group)
   }
 
   return { faceGroups, groupColors }
+}
+
+function getCurrentFaceIndexForSourceFace(sourceFaceIndices: number[], sourceFaceIndex: number) {
+  const currentFaceIndex = sourceFaceIndices.indexOf(sourceFaceIndex)
+  return currentFaceIndex >= 0 ? currentFaceIndex : null
 }
 
 function computeFaceSemanticGroups(
