@@ -1277,7 +1277,7 @@ function buildObjectGeometryBlueprint(
     const polygon = polygons[polyIndex]
     if (polygon.length === 1) {
       const ring = polygon[0]
-      const ringVertices = collectRingVertices(ring, vertices)
+      const ringVertices = removeClosingDuplicateVertex(collectRingVertices(ring, vertices))
       const polygonVertexCount = ringVertices.length
       if (polygonVertexCount < 3) {
         polygonTriangleIndices.push([])
@@ -1331,9 +1331,11 @@ function buildObjectGeometryBlueprint(
 
     const projectedPolygon = polygon
       .map((ring) =>
-        ring
-          .map((index) => vertices[index])
-          .filter((vertex): vertex is Vec3 => Array.isArray(vertex)),
+        removeClosingDuplicateVertex(
+          ring
+            .map((index) => vertices[index])
+            .filter((vertex): vertex is Vec3 => Array.isArray(vertex)),
+        ),
       )
       .filter((ring) => ring.length >= 3)
 
@@ -1426,6 +1428,18 @@ function collectRingVertices(ring: number[], vertices: Vec3[]) {
     }
   }
   return ringVertices
+}
+
+function removeClosingDuplicateVertex(ringVertices: Vec3[]) {
+  if (ringVertices.length < 2) {
+    return ringVertices
+  }
+
+  const first = ringVertices[0]
+  const last = ringVertices[ringVertices.length - 1]
+  return first[0] === last[0] && first[1] === last[1] && first[2] === last[2]
+    ? ringVertices.slice(0, -1)
+    : ringVertices
 }
 
 function fillRingBuffers(
