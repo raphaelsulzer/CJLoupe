@@ -1831,9 +1831,9 @@ function App() {
   const detailOverlayPositionClass = isMobileLayout ? 'bottom-20 left-3 right-3' : 'bottom-12 left-4 max-w-md'
   const infoPanelPositionClass = isMobileLayout ? 'left-3 right-3 top-4' : 'bottom-12 left-4 max-w-sm'
   const showInfoPanelPinnedSection = isPinnedAttributesOpen && !isMobileLayout
-  const showInfoPanelAttributeSection = Boolean(attributeColorKey)
+  const showInfoPanelAttributeSection = isPinnedAttributesOpen && Boolean(attributeColorKey) && !isMobileLayout
   const showSemanticPanel = Boolean(!editMode && showSemanticSurfaces && activeSemanticSurface)
-  const showInfoPanel = showInfoPanelPinnedSection || showInfoPanelAttributeSection
+  const showInfoPanel = isPinnedAttributesOpen && !isMobileLayout
   const showInfoPanelStack = showInfoPanel || showSemanticPanel
   const mobileViewportHeightClass = isPaneCollapsed
     ? 'h-[calc(100dvh_-_(3.5rem+env(safe-area-inset-bottom)))]'
@@ -2394,6 +2394,7 @@ function App() {
                 onRerandomizeNominalColors={handleRerandomizeNominalColors}
                 onCustomNominalColorChange={handleCustomNominalColorChange}
                 onClearAttributeColor={handleClearAttributeColor}
+                onClose={() => setIsPinnedAttributesOpen(false)}
               />
             )}
           </div>
@@ -3110,9 +3111,9 @@ function DesktopViewportStatusBar({
               : 'text-muted-foreground hover:bg-accent/10 hover:text-foreground',
           )}
           onClick={onTogglePinnedAttributesOpen}
-          aria-label={isPinnedAttributesOpen ? 'Collapse pinned attributes' : 'Expand pinned attributes'}
+          aria-label={isPinnedAttributesOpen ? 'Hide info panel' : 'Show info panel'}
           aria-expanded={isPinnedAttributesOpen}
-          title={isPinnedAttributesOpen ? 'Collapse pinned attributes' : 'Expand pinned attributes'}
+          title={isPinnedAttributesOpen ? 'Hide info panel' : 'Show info panel'}
         >
           <Pin  className="size-3" />
           {pinnedAttributeCount > 0 && (
@@ -4511,6 +4512,7 @@ function InfoPanel({
   onRerandomizeNominalColors,
   onCustomNominalColorChange,
   onClearAttributeColor,
+  onClose,
 }: {
   openSections: Record<InfoPanelSection, boolean>
   showPinnedSection: boolean
@@ -4541,15 +4543,25 @@ function InfoPanel({
   onRerandomizeNominalColors: () => void
   onCustomNominalColorChange: (attributeKey: string, categoryKey: string, color: string) => void
   onClearAttributeColor: () => void
+  onClose: () => void
 }) {
   return (
     <div className="floating-panel pointer-events-auto flex min-h-0 w-full flex-col overflow-hidden rounded-sm border">
-      <div className="border-b border-border/55 px-3 py-2">
-        <div className="min-w-0">
-          <p className="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
-            Pinned attributes
-          </p>
-        </div>
+      <div className="flex items-center justify-between border-b border-border/55 px-3 py-2">
+        <p className="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+          Pinned attributes
+        </p>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="size-5 shrink-0 rounded-[3px] p-0 text-muted-foreground hover:text-foreground"
+          onClick={onClose}
+          aria-label="Close info panel"
+          title="Close info panel"
+        >
+          <X className="size-3" />
+        </Button>
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
