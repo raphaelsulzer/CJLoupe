@@ -3,6 +3,7 @@
 ## Unreleased
 - Fix issue with colormap clamping past max value
 - Improve performance for large datasets by batching into fewer threejs objects
+- Add jump flood outline rendering for selected object
 
 ## 0.6.0 - 2026-05-08
 

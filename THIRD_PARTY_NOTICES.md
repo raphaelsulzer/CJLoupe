@@ -21,3 +21,11 @@ Imported files:
 - `src/assets/blender-icons/restrict_select_on.svg`
 - `src/assets/blender-icons/tracker.svg`
 - `src/assets/blender-icons/vertexsel.svg`
+
+## Three Jump Flood Demo
+
+The selected-object outline shader in `src/components/viewer/city-viewport.tsx` adapts the jump flood outline technique from:
+
+- Project: https://github.com/gkjohnson/three-jumpflood-demo
+- Copyright: Copyright (c) 2025 Garrett Johnson
+- License: MIT License

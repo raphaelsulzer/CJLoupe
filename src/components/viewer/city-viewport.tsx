@@ -5,6 +5,7 @@ import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 import { ArcballControls } from 'three/examples/jsm/controls/ArcballControls.js'
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
+import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js'
 
 import type {
   PolygonRings,
@@ -46,6 +47,7 @@ const BATCH_MAX_OBJECT_COUNT = 900
 const BATCH_MAX_VERTEX_COUNT = 60000
 const BATCH_MAX_INDEX_COUNT = 120000
 const EDIT_VERTEX_PICK_RADIUS_PIXELS = 14
+const SELECTION_OUTLINE_THICKNESS_PIXELS = 10
 const EMPTY_FACE_INDEX_SET = new Set<number>()
 
 const OBJECT_TYPE_COLORS: Record<Theme, Record<string, string>> = {
@@ -177,6 +179,15 @@ type Runtime = {
   handleGroup: THREE.Group
   edgeGroup: THREE.Group
   annotationGroup: THREE.Group
+  selectionOutlineScene: THREE.Scene
+  selectionOutlineGroup: THREE.Group
+  selectionOutlineTargets: [THREE.WebGLRenderTarget, THREE.WebGLRenderTarget]
+  selectionOutlineSeedQuad: FullScreenQuad
+  selectionOutlineJfaQuad: FullScreenQuad
+  selectionOutlineEffectQuad: FullScreenQuad
+  selectionOutlineSeedMaterial: SelectionOutlineSeedMaterial
+  selectionOutlineDepthMaterial: THREE.MeshBasicMaterial
+  selectionOutlineObjectKey: string | null
   raycaster: THREE.Raycaster
   pointer: THREE.Vector2
   meshesByObjectKey: Map<string, THREE.Mesh>
@@ -284,6 +295,199 @@ type ViewSelection = {
   selectedFaceIndex: number | null
   selectedFaceRingIndex: number
   selectedVertexIndex: number | null
+}
+
+class SelectionOutlineSeedMaterial extends THREE.ShaderMaterial {
+  set negative(value: boolean) {
+    this.uniforms.negative.value = value ? -1 : 1
+  }
+
+  constructor() {
+    super({
+      uniforms: {
+        negative: { value: 1 },
+      },
+      vertexShader: /* glsl */`
+        #include <common>
+        #include <logdepthbuf_pars_vertex>
+
+        void main() {
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          #include <logdepthbuf_vertex>
+        }
+      `,
+      fragmentShader: /* glsl */`
+        precision highp float;
+
+        uniform int negative;
+        #include <logdepthbuf_pars_fragment>
+
+        void main() {
+          #include <logdepthbuf_fragment>
+          gl_FragColor = vec4(gl_FragCoord.xy, 10000.0 * float(negative), 1.0);
+        }
+      `,
+    })
+  }
+}
+
+class SelectionOutlineJFAMaterial extends THREE.ShaderMaterial {
+  set source(value: THREE.Texture | null) {
+    this.uniforms.source.value = value
+  }
+
+  set step(value: number) {
+    this.uniforms.step.value = value
+  }
+
+  constructor() {
+    super({
+      glslVersion: THREE.GLSL3,
+      depthTest: false,
+      depthWrite: false,
+      uniforms: {
+        source: { value: null },
+        step: { value: 0 },
+      },
+      vertexShader: /* glsl */`
+        out vec2 vUv;
+
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        precision highp float;
+        precision highp int;
+
+        uniform sampler2D source;
+        uniform int step;
+
+        out vec4 outColor;
+
+        void main() {
+          ivec2 size = textureSize(source, 0);
+          ivec2 currCoord = ivec2(gl_FragCoord.xy);
+          vec3 result = texelFetch(source, currCoord, 0).rgb;
+          float resultSign = sign(result.z);
+          ivec2 otherCoord;
+          vec3 other;
+
+          for (int x = -1; x <= 1; x++) {
+            for (int y = -1; y <= 1; y++) {
+              if (x == 0 && y == 0) {
+                continue;
+              }
+
+              otherCoord = currCoord + ivec2(x, y) * step;
+              if (
+                otherCoord.x < size.x && otherCoord.x >= 0 &&
+                otherCoord.y < size.y && otherCoord.y >= 0
+              ) {
+                other = texelFetch(source, otherCoord, 0).rgb;
+                if (other.b != 0.0) {
+                  if (resultSign != sign(other.z)) {
+                    float dist = length(vec2(currCoord - otherCoord));
+                    if (dist < abs(result.z)) {
+                      result = vec3(vec2(otherCoord), dist * resultSign);
+                    }
+                  } else if (any(notEqual(ivec2(other.rg), otherCoord))) {
+                    float dist = length(vec2(currCoord - ivec2(other.rg)));
+                    if (dist < abs(result.z)) {
+                      result = vec3(other.rg, dist * resultSign);
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          outColor = vec4(result, 1.0);
+        }
+      `,
+    })
+  }
+}
+
+class SelectionOutlineEffectMaterial extends THREE.ShaderMaterial {
+  set map(value: THREE.Texture | null) {
+    this.uniforms.map.value = value
+  }
+
+  set thickness(value: number) {
+    this.uniforms.thickness.value = value
+  }
+
+  get color() {
+    return this.uniforms.color.value as THREE.Color
+  }
+
+  constructor() {
+    super({
+      glslVersion: THREE.GLSL3,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      uniforms: {
+        map: { value: null },
+        color: { value: new THREE.Color('#f59e0b') },
+        thickness: { value: SELECTION_OUTLINE_THICKNESS_PIXELS },
+      },
+      vertexShader: /* glsl */`
+        out vec2 vUv;
+
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        precision highp float;
+        precision highp int;
+
+        uniform sampler2D map;
+        uniform vec3 color;
+        uniform float thickness;
+
+        out vec4 outColor;
+
+        void main() {
+          ivec2 currCoord = ivec2(gl_FragCoord.xy);
+          vec3 seed = texelFetch(map, currCoord, 0).rgb;
+
+          if (seed.b == 0.0) {
+            discard;
+          }
+
+          float dist = seed.b;
+          float width = 0.75;
+          float alpha =
+            smoothstep(thickness + width, thickness - width, dist) *
+            smoothstep(-width - 1.0, width - 1.0, dist);
+
+          if (alpha <= 0.0) {
+            discard;
+          }
+
+          outColor = vec4(color, alpha);
+        }
+      `,
+    })
+  }
+}
+
+function createSelectionOutlineTarget() {
+  return new THREE.WebGLRenderTarget(1, 1, {
+    format: THREE.RGBAFormat,
+    type: THREE.FloatType,
+    minFilter: THREE.NearestFilter,
+    magFilter: THREE.NearestFilter,
+    wrapS: THREE.ClampToEdgeWrapping,
+    wrapT: THREE.ClampToEdgeWrapping,
+    depthBuffer: true,
+    stencilBuffer: false,
+  })
 }
 
 function CityViewport({
@@ -483,6 +687,23 @@ function CityViewport({
     const annotationGroup = new THREE.Group()
     scene.add(annotationGroup)
 
+    const selectionOutlineScene = new THREE.Scene()
+    const selectionOutlineGroup = new THREE.Group()
+    selectionOutlineScene.add(selectionOutlineGroup)
+    const selectionOutlineSeedMaterial = new SelectionOutlineSeedMaterial()
+    selectionOutlineSeedMaterial.side = THREE.DoubleSide
+    const selectionOutlineDepthMaterial = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide })
+    selectionOutlineDepthMaterial.colorWrite = false
+    selectionOutlineDepthMaterial.depthWrite = true
+    selectionOutlineDepthMaterial.depthTest = true
+    const selectionOutlineTargets: [THREE.WebGLRenderTarget, THREE.WebGLRenderTarget] = [
+      createSelectionOutlineTarget(),
+      createSelectionOutlineTarget(),
+    ]
+    const selectionOutlineSeedQuad = new FullScreenQuad(selectionOutlineSeedMaterial)
+    const selectionOutlineJfaQuad = new FullScreenQuad(new SelectionOutlineJFAMaterial())
+    const selectionOutlineEffectQuad = new FullScreenQuad(new SelectionOutlineEffectMaterial())
+
     const runtime: Runtime = {
       renderer,
       scene,
@@ -494,6 +715,15 @@ function CityViewport({
       handleGroup,
       edgeGroup,
       annotationGroup,
+      selectionOutlineScene,
+      selectionOutlineGroup,
+      selectionOutlineTargets,
+      selectionOutlineSeedQuad,
+      selectionOutlineJfaQuad,
+      selectionOutlineEffectQuad,
+      selectionOutlineSeedMaterial,
+      selectionOutlineDepthMaterial,
+      selectionOutlineObjectKey: null,
       raycaster: new THREE.Raycaster(),
       pointer: new THREE.Vector2(),
       meshesByObjectKey: new Map(),
@@ -844,6 +1074,7 @@ function CityViewport({
       resizeObserver.disconnect()
       window.removeEventListener('resize', handleResize)
       disposeSceneContents(runtime)
+      disposeSelectionOutlineResources(runtime)
       runtime.attributeColorSharedUniforms.valueMap.value.dispose()
       transform.dispose()
       arcball.dispose()
@@ -2369,6 +2600,7 @@ function syncSelection(
   showVertexGizmo: boolean,
 ) {
   syncSemanticSelectionUniforms(runtime, selection)
+  syncSelectionOutlineProxy(runtime, data, selection)
   applySelectionAppearance(runtime, selection, isolateSelectedFeature, runtime.meshesByObjectKey.values())
   applyBatchSelectionAppearance(runtime, selection, isolateSelectedFeature, runtime.batchedObjectsByObjectKey.values())
   rebuildHandles(runtime, data, selection, hideOccludedEditEdges, showVertexGizmo)
@@ -2385,6 +2617,7 @@ function syncSelectionDelta(
   showVertexGizmo: boolean,
 ) {
   syncSemanticSelectionUniforms(runtime, selection)
+  syncSelectionOutlineProxy(runtime, data, selection)
   const previousIsolateActive = previousIsolateSelectedFeature && previousSelection.selectedFeatureId != null
   const isolateActive = isolateSelectedFeature && selection.selectedFeatureId != null
   const previousSemanticObjectSelectionActive =
@@ -2413,6 +2646,208 @@ function syncSelectionDelta(
     collectAffectedBatchRecords(runtime, previousSelection.selectedFeatureId, selection.selectedFeatureId),
   )
   rebuildHandles(runtime, data, selection, hideOccludedEditEdges, showVertexGizmo)
+}
+
+function syncSelectionOutlineProxy(
+  runtime: Runtime,
+  data: ViewerDataset,
+  selection: ViewSelection,
+) {
+  clearSelectionOutlineProxy(runtime)
+
+  if (
+    selection.editMode ||
+    !selection.selectedFeatureId ||
+    !selection.activeObjectId ||
+    !runtime.renderer.capabilities.isWebGL2
+  ) {
+    return
+  }
+
+  const feature = data.features.find((candidate) => candidate.id === selection.selectedFeatureId) ?? null
+  const object = feature?.objects.find((candidate) => candidate.id === selection.activeObjectId) ?? null
+  const objectGeometry = feature && object
+    ? resolveDisplayedObjectGeometry(feature, object, selection)
+    : null
+  const draftVertices = feature ? runtime.featureDrafts.get(feature.id) ?? feature.vertices : null
+  if (!feature || !object || !objectGeometry || !draftVertices) {
+    return
+  }
+
+  runtime.selectionOutlineObjectKey = viewerObjectKey(feature.id, object.id)
+  const featureCenter: Vec3 = [
+    (feature.extent[0] + feature.extent[3]) * 0.5,
+    (feature.extent[1] + feature.extent[4]) * 0.5,
+    (feature.extent[2] + feature.extent[5]) * 0.5,
+  ]
+  const blueprint = buildObjectGeometryBlueprint(objectGeometry.polygons, draftVertices, featureCenter)
+  const geometry = buildUngroupedObjectGeometry(blueprint)
+  const mesh = new THREE.Mesh(geometry, runtime.selectionOutlineSeedMaterial)
+  mesh.position.set(
+    featureCenter[0] - data.center[0],
+    featureCenter[1] - data.center[1],
+    featureCenter[2] - data.center[2],
+  )
+  runtime.selectionOutlineGroup.add(mesh)
+}
+
+function clearSelectionOutlineProxy(runtime: Runtime) {
+  for (const child of [...runtime.selectionOutlineGroup.children]) {
+    if (child instanceof THREE.Mesh) {
+      child.geometry.dispose()
+    }
+    runtime.selectionOutlineGroup.remove(child)
+  }
+  runtime.selectionOutlineObjectKey = null
+}
+
+function renderSelectionOutline(runtime: Runtime) {
+  if (
+    runtime.selectionOutlineGroup.children.length === 0 ||
+    !runtime.renderer.capabilities.isWebGL2
+  ) {
+    return
+  }
+
+  syncSelectionOutlineTargetSize(runtime)
+
+  const renderer = runtime.renderer
+  const [firstTarget, secondTarget] = runtime.selectionOutlineTargets
+  const previousRenderTarget = renderer.getRenderTarget()
+  const previousAutoClear = renderer.autoClear
+  const previousOverrideMaterial = runtime.scene.overrideMaterial
+  const previousClearColor = new THREE.Color()
+  renderer.getClearColor(previousClearColor)
+  const previousClearAlpha = renderer.getClearAlpha()
+  const previousHandleVisibility = runtime.handleGroup.visible
+  const previousEdgeVisibility = runtime.edgeGroup.visible
+  const previousAnnotationVisibility = runtime.annotationGroup.visible
+  const hiddenSelectedObject = hideSelectionOutlineDepthSelf(runtime)
+
+  runtime.selectionOutlineSeedMaterial.negative = false
+  runtime.selectionOutlineSeedMaterial.depthTest = false
+  runtime.selectionOutlineSeedMaterial.depthWrite = false
+  renderer.setRenderTarget(firstTarget)
+  renderer.setClearColor(0x000000, 0)
+  renderer.clear(true, true, true)
+  runtime.selectionOutlineSeedQuad.render(renderer)
+
+  renderer.autoClear = false
+  runtime.handleGroup.visible = false
+  runtime.edgeGroup.visible = false
+  runtime.annotationGroup.visible = false
+  runtime.scene.overrideMaterial = runtime.selectionOutlineDepthMaterial
+  renderer.render(runtime.scene, runtime.camera)
+  runtime.scene.overrideMaterial = previousOverrideMaterial
+  runtime.handleGroup.visible = previousHandleVisibility
+  runtime.edgeGroup.visible = previousEdgeVisibility
+  runtime.annotationGroup.visible = previousAnnotationVisibility
+  restoreSelectionOutlineDepthSelf(hiddenSelectedObject)
+
+  runtime.selectionOutlineSeedMaterial.negative = true
+  runtime.selectionOutlineSeedMaterial.depthTest = true
+  runtime.selectionOutlineSeedMaterial.depthWrite = false
+  renderer.render(runtime.selectionOutlineScene, runtime.camera)
+  runtime.selectionOutlineSeedMaterial.depthTest = false
+
+  let readTarget = firstTarget
+  let writeTarget = secondTarget
+  let step = Math.min(
+    Math.max(firstTarget.width, firstTarget.height),
+    SELECTION_OUTLINE_THICKNESS_PIXELS,
+  )
+  while (true) {
+    const material = runtime.selectionOutlineJfaQuad.material as SelectionOutlineJFAMaterial
+    material.source = readTarget.texture
+    material.step = step
+    renderer.setRenderTarget(writeTarget)
+    runtime.selectionOutlineJfaQuad.render(renderer)
+
+    const nextReadTarget = writeTarget
+    writeTarget = readTarget
+    readTarget = nextReadTarget
+
+    if (step <= 1) {
+      break
+    }
+    step = Math.ceil(step * 0.5)
+  }
+
+  const effectMaterial = runtime.selectionOutlineEffectQuad.material as SelectionOutlineEffectMaterial
+  effectMaterial.map = readTarget.texture
+  effectMaterial.thickness = SELECTION_OUTLINE_THICKNESS_PIXELS
+  effectMaterial.color.set(runtime.theme === 'light' ? '#22d3ee' : '#22d3ee')
+  renderer.setRenderTarget(previousRenderTarget)
+  runtime.selectionOutlineEffectQuad.render(renderer)
+
+  renderer.autoClear = previousAutoClear
+  renderer.setClearColor(previousClearColor, previousClearAlpha)
+}
+
+function hideSelectionOutlineDepthSelf(runtime: Runtime) {
+  const objectKey = runtime.selectionOutlineObjectKey
+  if (!objectKey) {
+    return null
+  }
+
+  const mesh = runtime.meshesByObjectKey.get(objectKey)
+  if (mesh) {
+    const visible = mesh.visible
+    mesh.visible = false
+    return { kind: 'mesh' as const, mesh, visible }
+  }
+
+  const record = runtime.batchedObjectsByObjectKey.get(objectKey)
+  if (record) {
+    const visible = record.batch.getVisibleAt(record.instanceId)
+    record.batch.setVisibleAt(record.instanceId, false)
+    return { kind: 'batch' as const, record, visible }
+  }
+
+  return null
+}
+
+function restoreSelectionOutlineDepthSelf(
+  hidden:
+    | { kind: 'mesh'; mesh: THREE.Mesh; visible: boolean }
+    | { kind: 'batch'; record: BatchedObjectRecord; visible: boolean }
+    | null,
+) {
+  if (!hidden) {
+    return
+  }
+
+  if (hidden.kind === 'mesh') {
+    hidden.mesh.visible = hidden.visible
+  } else {
+    hidden.record.batch.setVisibleAt(hidden.record.instanceId, hidden.visible)
+  }
+}
+
+function syncSelectionOutlineTargetSize(runtime: Runtime) {
+  const size = runtime.renderer.getDrawingBufferSize(new THREE.Vector2())
+  const width = Math.max(1, Math.floor(size.x))
+  const height = Math.max(1, Math.floor(size.y))
+
+  for (const target of runtime.selectionOutlineTargets) {
+    if (target.width !== width || target.height !== height) {
+      target.setSize(width, height)
+    }
+  }
+}
+
+function disposeSelectionOutlineResources(runtime: Runtime) {
+  clearSelectionOutlineProxy(runtime)
+  for (const target of runtime.selectionOutlineTargets) {
+    target.dispose()
+  }
+  runtime.selectionOutlineSeedQuad.dispose()
+  runtime.selectionOutlineJfaQuad.dispose()
+  runtime.selectionOutlineEffectQuad.dispose()
+  runtime.selectionOutlineSeedMaterial.dispose()
+  runtime.selectionOutlineDepthMaterial.dispose()
+  ;(runtime.selectionOutlineJfaQuad.material as THREE.Material).dispose()
+  ;(runtime.selectionOutlineEffectQuad.material as THREE.Material).dispose()
 }
 
 function applySelectionAppearance(
@@ -3149,6 +3584,7 @@ function renderViewport(runtime: Runtime) {
   syncCameraLightRig(runtime)
   runtime.renderer.clear(true, true, true)
   runtime.renderer.render(runtime.scene, runtime.camera)
+  renderSelectionOutline(runtime)
 }
 
 function reportViewportCenter(
