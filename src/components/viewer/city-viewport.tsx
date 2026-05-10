@@ -47,7 +47,7 @@ const BATCH_MAX_OBJECT_COUNT = 900
 const BATCH_MAX_VERTEX_COUNT = 60000
 const BATCH_MAX_INDEX_COUNT = 120000
 const EDIT_VERTEX_PICK_RADIUS_PIXELS = 14
-const SELECTION_OUTLINE_THICKNESS_PIXELS = 3
+const SELECTION_OUTLINE_THICKNESS_PIXELS = 4
 const EMPTY_FACE_INDEX_SET = new Set<number>()
 
 const SELECTION_EFFECT_COLORS: Record<Theme, { outline: string; overlay: string; overlayOpacity: number }> = {
@@ -194,6 +194,8 @@ type Runtime = {
   annotationGroup: THREE.Group
   selectionOutlineScene: THREE.Scene
   selectionOutlineGroup: THREE.Group
+  selectionOutlineOccluderScene: THREE.Scene
+  selectionOutlineOccluderGroup: THREE.Group
   selectionOutlineTargets: [THREE.WebGLRenderTarget, THREE.WebGLRenderTarget]
   selectionOutlineSeedQuad: FullScreenQuad
   selectionOutlineJfaQuad: FullScreenQuad
@@ -762,6 +764,9 @@ function CityViewport({
     const selectionOutlineScene = new THREE.Scene()
     const selectionOutlineGroup = new THREE.Group()
     selectionOutlineScene.add(selectionOutlineGroup)
+    const selectionOutlineOccluderScene = new THREE.Scene()
+    const selectionOutlineOccluderGroup = new THREE.Group()
+    selectionOutlineOccluderScene.add(selectionOutlineOccluderGroup)
     const selectionOutlineSeedMaterial = new SelectionOutlineSeedMaterial()
     selectionOutlineSeedMaterial.side = THREE.DoubleSide
     const selectionOverlayMaterial = new SelectionOverlayMaterial()
@@ -792,6 +797,8 @@ function CityViewport({
       annotationGroup,
       selectionOutlineScene,
       selectionOutlineGroup,
+      selectionOutlineOccluderScene,
+      selectionOutlineOccluderGroup,
       selectionOutlineTargets,
       selectionOutlineSeedQuad,
       selectionOutlineJfaQuad,
@@ -2743,6 +2750,17 @@ function syncSelectionOutlineProxy(
     featureCenter[2] - data.center[2],
   )
   runtime.selectionOutlineGroup.add(mesh)
+
+  if (selection.selectedFaceIndex != null) {
+    const occluderPolygons = objectGeometry.polygons.filter((_, index) => index !== selection.selectedFaceIndex)
+    if (occluderPolygons.length > 0) {
+      const occluderBlueprint = buildObjectGeometryBlueprint(occluderPolygons, draftVertices, featureCenter)
+      const occluderGeometry = buildUngroupedObjectGeometry(occluderBlueprint)
+      const occluderMesh = new THREE.Mesh(occluderGeometry, runtime.selectionOutlineDepthMaterial)
+      occluderMesh.position.copy(mesh.position)
+      runtime.selectionOutlineOccluderGroup.add(occluderMesh)
+    }
+  }
 }
 
 function clearSelectionOutlineProxy(runtime: Runtime) {
@@ -2751,6 +2769,12 @@ function clearSelectionOutlineProxy(runtime: Runtime) {
       child.geometry.dispose()
     }
     runtime.selectionOutlineGroup.remove(child)
+  }
+  for (const child of [...runtime.selectionOutlineOccluderGroup.children]) {
+    if (child instanceof THREE.Mesh) {
+      child.geometry.dispose()
+    }
+    runtime.selectionOutlineOccluderGroup.remove(child)
   }
   runtime.selectionOutlineObjectKey = null
   runtime.selectionOutlineVisible = true
@@ -2794,6 +2818,7 @@ function renderSelectionOutline(runtime: Runtime) {
   runtime.scene.overrideMaterial = runtime.selectionOutlineDepthMaterial
   renderer.render(runtime.scene, runtime.camera)
   runtime.scene.overrideMaterial = previousOverrideMaterial
+  renderer.render(runtime.selectionOutlineOccluderScene, runtime.camera)
   runtime.handleGroup.visible = previousHandleVisibility
   runtime.edgeGroup.visible = previousEdgeVisibility
   runtime.annotationGroup.visible = previousAnnotationVisibility
