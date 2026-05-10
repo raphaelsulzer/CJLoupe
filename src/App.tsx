@@ -1802,7 +1802,7 @@ function App() {
   const isFeaturePanelVisible = !isMobileLayout || mobilePanelView === 'features'
   const isDetailPanelVisible = !isMobileLayout || mobilePanelView === 'details'
   const detailOverlayPositionClass = isMobileLayout ? 'bottom-20 left-3 right-3' : 'bottom-12 left-4 max-w-md'
-  const infoPanelPositionClass = isMobileLayout ? 'left-3 right-3 top-4' : 'bottom-12 left-4 right-4 max-w-sm'
+  const infoPanelPositionClass = isMobileLayout ? 'bottom-20 left-3 right-3 top-4' : 'bottom-12 left-4 right-4 top-4 max-w-sm'
   const showInfoPanelPinnedSection = isPinnedAttributesOpen && !isMobileLayout
   const showInfoPanelAttributeSection = isPinnedAttributesOpen && Boolean(attributeColorKey) && !isMobileLayout
   const showSemanticPanel = Boolean(!editMode && activeSemanticSurface)
@@ -2339,7 +2339,7 @@ function App() {
         )}
 
         {showInfoPanelStack && (
-          <div className={cn('pointer-events-none absolute z-20 flex max-h-[calc(100dvh-5rem)] flex-col gap-2', infoPanelPositionClass)}>
+          <div className={cn('pointer-events-none absolute z-20 flex flex-col gap-2', isMobileLayout ? 'justify-start' : 'justify-end', infoPanelPositionClass)}>
             {showSemanticPanel && activeSemanticSurface && (
               <SemanticSurfacePanel
                 isOpen={infoPanelOpenSections.semantic}
@@ -4521,7 +4521,7 @@ function InfoPanel({
 }) {
   return (
     <div className="floating-panel pointer-events-auto flex min-h-0 w-full flex-col overflow-hidden rounded-sm border">
-      <div className="flex items-center justify-between border-b border-border/55 px-3 py-2">
+      <div className="flex shrink-0 items-center justify-between border-b border-border/55 px-3 py-2">
         <p className="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
           Pinned attributes
         </p>
@@ -4702,10 +4702,10 @@ function SemanticSurfacePanel({
   const CollapseIcon = isMobileLayout ? ChevronUp : ChevronDown
 
   return (
-    <div className="floating-panel pointer-events-auto w-full overflow-hidden rounded-sm border">
+    <div className="floating-panel pointer-events-auto flex min-h-0 w-full flex-col overflow-hidden rounded-sm border">
       <button
         type="button"
-        className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left"
+        className="flex w-full min-w-0 shrink-0 items-center gap-2 px-3 py-2 text-left"
         onClick={onToggle}
         aria-expanded={isOpen}
       >
@@ -4730,9 +4730,11 @@ function SemanticSurfacePanel({
         {isOpen ? <CollapseIcon className="size-4 shrink-0" /> : <ExpandIcon className="size-4 shrink-0" />}
       </button>
       {isOpen && (
-        <div className="border-t border-border/45 p-2">
-          <SemanticSurfaceInfoSection semanticSurface={semanticSurface} />
-        </div>
+        <ScrollArea className="min-h-0 flex-1 border-t border-border/45">
+          <div className="p-2">
+            <SemanticSurfaceInfoSection semanticSurface={semanticSurface} />
+          </div>
+        </ScrollArea>
       )}
     </div>
   )
