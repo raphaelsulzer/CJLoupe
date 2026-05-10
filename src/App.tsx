@@ -1221,7 +1221,7 @@ function App() {
         featureId: selectedFeature.id,
         objectId: activeObjectId,
         geometryIndex: resolvedActiveGeometryIndex,
-        faceIndex: editMode ? selectedFaceIndex : null,
+        faceIndex: selectedFaceIndex,
         location: null,
         preserveCameraOffset: editMode,
       })
