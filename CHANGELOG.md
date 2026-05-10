@@ -3,8 +3,10 @@
 ## Unreleased
 - Fix issue with colormap clamping past max value
 - Improve performance for large datasets by batching into fewer threejs objects
+- Performance improvements for editing objects in large datasets
 - Add jump flood outline rendering for selected object/face
 - Allow face picking outside of semantics mode
+- Use table layout for semantic attribute list
 
 ## 0.6.0 - 2026-05-08
 

@@ -246,7 +246,7 @@ function App() {
   const [infoPanelOpenSections, setInfoPanelOpenSections] = useState<Record<InfoPanelSection, boolean>>({
     pinned: true,
     attribute: true,
-    semantic: true,
+    semantic: false,
   })
   const [attributeColorKey, setAttributeColorKey] = useState<string | null>(null)
   const [attributeColorInheritsParent, setAttributeColorInheritsParent] = useState(true)
@@ -1774,6 +1774,16 @@ function App() {
         event.preventDefault()
         setIsolateSelectedFeature((current) => !current)
       }
+
+      if (
+        event.key.toLowerCase() === 'b' &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey
+      ) {
+        event.preventDefault()
+        toggleSidebarVisibility()
+      }
     }
 
     window.addEventListener('keydown', handleKeyDown)
@@ -1826,6 +1836,7 @@ function App() {
         { keys: 'Pinch', description: 'Zoom' },
         { keys: 'Panel', description: 'Browse features and details' },
         { keys: 'Sem', description: 'Toggle semantic colors' },
+        { keys: 'B', description: 'Toggle sidebar' },
       ]
     : editMode
       ? [
@@ -1833,10 +1844,12 @@ function App() {
           { keys: 'J / K', description: 'Step active ring' },
           { keys: 'R', description: 'Cycle rings' },
           { keys: 'D', description: 'Delete selected face' },
+          { keys: 'B', description: 'Toggle sidebar' },
         ]
       : [
           { keys: 'Click', description: getPickingModeDescription(effectivePickingMode) },
           { keys: 'Double Click', description: 'Recenter navigation' },
+          { keys: 'B', description: 'Toggle sidebar' },
         ]
 
   return (
@@ -4836,19 +4849,29 @@ function SemanticSurfaceInfoSection({
   }
 
   return (
-    <dl className="m-0 space-y-1.5">
+    <div className="grid min-w-0">
+      <div className="grid grid-cols-[minmax(0,1.25fr)_minmax(0,0.85fr)] items-center gap-1 border-b border-border/55 px-1.5 py-1">
+        <div className="font-mono text-[9px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+          Attribute
+        </div>
+        <div className="font-mono text-[9px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+          Value
+        </div>
+      </div>
       {attributeEntries.map(([key, value]) => (
         <div
           key={key}
-          className="rounded-sm border border-foreground/8 bg-foreground/3 px-2.5 py-1.5"
+          className="grid min-w-0 grid-cols-[minmax(0,1.25fr)_minmax(0,0.85fr)] items-center gap-1 border-b border-border/35 px-1.5 py-1 last:border-b-0"
         >
-          <dt className="font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground/70">
+          <span className="min-w-0 truncate font-mono text-[10px] uppercase leading-5 tracking-[0.12em] text-muted-foreground/78">
             {key}
-          </dt>
-          <dd className="mt-1 text-sm text-foreground/80">{formatValue(value)}</dd>
+          </span>
+          <span className="min-w-0 truncate text-[12px] leading-5 text-foreground/82">
+            {formatValue(value)}
+          </span>
         </div>
       ))}
-    </dl>
+    </div>
   )
 }
 
