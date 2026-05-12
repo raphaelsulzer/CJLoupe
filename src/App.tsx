@@ -150,6 +150,12 @@ type AttributeColorCategory = {
   color: string
   index: number
 }
+type FeatureSelectionMode = 'replace' | 'toggle' | 'range' | 'range-add' | 'preserve-if-selected'
+type SelectFeatureOptions = {
+  preserveEditMode?: boolean
+  openMobileDetails?: boolean
+  selectionMode?: FeatureSelectionMode
+}
 
 const VIEW_PICKING_MODES: ViewerPickingMode[] = ['none', 'object', 'face']
 const EDIT_PICKING_MODES: ViewerPickingMode[] = ['none', 'face', 'vertex']
@@ -222,6 +228,8 @@ function App() {
   const [isPaneCollapsed, setIsPaneCollapsed] = useState(false)
   const [editMode, setEditMode] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  const [selectedFeatureIds, setSelectedFeatureIds] = useState<string[]>([])
+  const [selectionAnchorFeatureId, setSelectionAnchorFeatureId] = useState<string | null>(null)
   const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null)
   const [activeObjectId, setActiveObjectId] = useState<string | null>(null)
   const [geometryDisplayMode, setGeometryDisplayMode] = useState<ViewerGeometryDisplayMode>({ kind: 'best' })
@@ -282,6 +290,7 @@ function App() {
   const featureMap = useMemo(() => {
     return new Map(dataset?.features.map((feature) => [feature.id, feature]) ?? [])
   }, [dataset, geometryRevision])
+  const selectedFeatureIdSet = useMemo(() => new Set(selectedFeatureIds), [selectedFeatureIds])
 
   const selectedFeature = selectedFeatureId ? featureMap.get(selectedFeatureId) ?? null : null
   const availableLods = useMemo(() => collectAvailableLods(dataset), [dataset])
@@ -934,6 +943,7 @@ function App() {
     setDataset(nextDataset)
 
     const firstFeature = nextDataset.features[0] ?? null
+    setSelectedFeatureIds(firstFeature ? [firstFeature.id] : [])
     setSelectedFeatureId(firstFeature?.id ?? null)
     setActiveObjectId(firstFeature?.objects[0]?.id ?? null)
     setActiveGeometryIndex(null)
@@ -1175,6 +1185,8 @@ function App() {
     surface: ViewerSemanticSurface | null
   } | null) => {
     if (surface) {
+      setSelectedFeatureIds([surface.featureId])
+      setSelectionAnchorFeatureId(surface.featureId)
       setSelectedFeatureId(surface.featureId)
       setActiveObjectId(surface.objectId)
     }
@@ -1370,7 +1382,7 @@ function App() {
   const handleSelectFeature = useCallback((
     featureId: string,
     objectId?: string | null,
-    options?: { preserveEditMode?: boolean; openMobileDetails?: boolean },
+    options?: SelectFeatureOptions,
   ) => {
     const feature = featureMap.get(featureId)
     if (!feature) {
@@ -1378,11 +1390,56 @@ function App() {
     }
 
     startTransition(() => {
+      const selectionMode = options?.selectionMode ?? 'replace'
+      const wasSelected = selectedFeatureIdSet.has(featureId)
+      const orderedFeatureIds = filteredFeatureItems.map((item) => item.feature.id)
+      const anchorFeatureId = selectionAnchorFeatureId && featureMap.has(selectionAnchorFeatureId)
+        ? selectionAnchorFeatureId
+        : (selectedFeatureIds[0] ?? null)
+
+      let nextSelectedFeatureIds: string[]
+      let nextSelectionAnchorFeatureId = selectionAnchorFeatureId
+      if (selectionMode === 'toggle') {
+        nextSelectedFeatureIds = wasSelected
+          ? selectedFeatureIds.filter((id) => id !== featureId)
+          : [...selectedFeatureIds, featureId]
+        if (!wasSelected) {
+          nextSelectionAnchorFeatureId = anchorFeatureId ?? featureId
+        } else if (nextSelectedFeatureIds.length === 0) {
+          nextSelectionAnchorFeatureId = null
+        } else if (anchorFeatureId === featureId) {
+          nextSelectionAnchorFeatureId = nextSelectedFeatureIds[nextSelectedFeatureIds.length - 1] ?? null
+        }
+      } else if (selectionMode === 'range' || selectionMode === 'range-add') {
+        const anchorIndex = anchorFeatureId ? orderedFeatureIds.indexOf(anchorFeatureId) : -1
+        const clickedIndex = orderedFeatureIds.indexOf(featureId)
+        const startIndex = anchorIndex >= 0 ? anchorIndex : clickedIndex
+        const endIndex = clickedIndex >= 0 ? clickedIndex : startIndex
+        const rangeStart = Math.min(startIndex, endIndex)
+        const rangeEnd = Math.max(startIndex, endIndex)
+        const rangeFeatureIds = rangeStart >= 0
+          ? orderedFeatureIds.slice(rangeStart, rangeEnd + 1)
+          : [featureId]
+        nextSelectedFeatureIds = selectionMode === 'range-add'
+          ? [...new Set([...selectedFeatureIds, ...rangeFeatureIds])]
+          : (rangeFeatureIds.length > 0 ? rangeFeatureIds : [featureId])
+        nextSelectionAnchorFeatureId = anchorFeatureId ?? featureId
+      } else if (selectionMode === 'preserve-if-selected' && wasSelected) {
+        nextSelectedFeatureIds = selectedFeatureIds
+      } else {
+        nextSelectedFeatureIds = [featureId]
+        nextSelectionAnchorFeatureId = featureId
+      }
+
+      const clickedStillSelected = nextSelectedFeatureIds.includes(featureId)
+      const nextActiveFeatureId = clickedStillSelected
+        ? featureId
+        : (nextSelectedFeatureIds[nextSelectedFeatureIds.length - 1] ?? null)
       const shouldExitEditMode =
         !options?.preserveEditMode &&
         editMode &&
         isolateSelectedFeature &&
-        featureId !== selectedFeatureId
+        nextActiveFeatureId !== selectedFeatureId
 
       if (shouldExitEditMode) {
         setEditMode(false)
@@ -1393,15 +1450,25 @@ function App() {
       if (isMobileLayout && options?.openMobileDetails) {
         setMobilePanelView('details')
       }
-      setSelectedFeatureId(featureId)
-      setActiveObjectId(objectId ?? feature.objects[0]?.id ?? null)
+
+      const nextActiveFeature = nextActiveFeatureId ? featureMap.get(nextActiveFeatureId) ?? null : null
+      const nextActiveObjectId = nextActiveFeature
+        ? (nextActiveFeatureId === featureId
+          ? (objectId ?? nextActiveFeature.objects[0]?.id ?? null)
+          : (nextActiveFeature.objects[0]?.id ?? null))
+        : null
+
+        setSelectedFeatureIds(nextSelectedFeatureIds)
+        setSelectionAnchorFeatureId(nextSelectionAnchorFeatureId)
+      setSelectedFeatureId(nextActiveFeatureId)
+      setActiveObjectId(nextActiveObjectId)
       setActiveGeometryIndex(null)
       setSelectedFaceIndex(null)
       setSelectedFaceRingIndex(0)
       setSelectedVertexIndex(null)
       setSelectedFaceVertexEntryIndex(null)
     })
-  }, [editMode, featureMap, isolateSelectedFeature, isMobileLayout, selectedFeatureId])
+  }, [editMode, featureMap, filteredFeatureItems, isolateSelectedFeature, isMobileLayout, selectedFeatureId, selectedFeatureIdSet, selectedFeatureIds, selectionAnchorFeatureId])
 
   const handleSearchQueryChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     setSearchQuery(event.target.value)
@@ -1420,8 +1487,11 @@ function App() {
     featureId: string,
     objectId?: string | null,
   ) => {
-    handleSelectFeature(featureId, objectId, { openMobileDetails: true })
-  }, [handleSelectFeature])
+    handleSelectFeature(featureId, objectId, {
+      openMobileDetails: true,
+      selectionMode: selectedFeatureIdSet.has(featureId) ? 'preserve-if-selected' : 'replace',
+    })
+  }, [handleSelectFeature, selectedFeatureIdSet])
 
   const handleSelectFace = useCallback((faceIndex: number | null) => {
     setSelectedFaceIndex(faceIndex)
@@ -1769,7 +1839,7 @@ function App() {
         !event.ctrlKey &&
         !event.metaKey &&
         !event.altKey &&
-        selectedFeatureId
+        selectedFeatureIds.length > 0
       ) {
         event.preventDefault()
         setIsolateSelectedFeature((current) => !current)
@@ -1788,7 +1858,7 @@ function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [centerCurrentSelection, cycleGeometryDisplayMode, cycleSelectedFaceRing, cycleSelectedFaceVertex, dataset, deleteSelectedFace, editMode, handlePickingModeShortcut, restoreSelectedFeatureGeometry, selectedFaceIndex, selectedFeatureId, toggleEditMode, toggleSemanticSurfaces])
+  }, [centerCurrentSelection, cycleGeometryDisplayMode, cycleSelectedFaceRing, cycleSelectedFaceVertex, dataset, deleteSelectedFace, editMode, handlePickingModeShortcut, restoreSelectedFeatureGeometry, selectedFaceIndex, selectedFeatureId, selectedFeatureIds.length, toggleEditMode, toggleSemanticSurfaces])
 
   const isErrorDialogVisible = Boolean(error && dismissedErrorMessage !== error)
   const hasModalScrim =
@@ -2045,6 +2115,7 @@ function App() {
                     datasetFeatureCount={dataset?.features.length ?? 0}
                     showDesktopHeading={!isMobileLayout}
                     searchQuery={searchQuery}
+                    selectedFeatureIds={selectedFeatureIds}
                     selectedFeatureId={selectedFeatureId}
                     showOnlyInvalidFeatures={showOnlyInvalidFeatures}
                     onSearchQueryChange={handleSearchQueryChange}
@@ -2293,6 +2364,7 @@ function App() {
             viewportResetRevision={viewportResetRevision}
             focusRevision={focusRevision}
             focusTarget={focusTarget}
+            selectedFeatureIds={selectedFeatureIds}
             selectedFeatureId={selectedFeatureId}
             activeObjectId={activeObjectId}
             editMode={editMode}
@@ -3666,6 +3738,7 @@ function CopyIdButton({
 const FeatureListRow = memo(function FeatureListRow({
   item,
   selected,
+  active,
   activeObjectId,
   activeGeometryIndex,
   onCenterFeature,
@@ -3675,10 +3748,11 @@ const FeatureListRow = memo(function FeatureListRow({
 }: {
   item: FeatureListItem
   selected: boolean
+  active: boolean
   activeObjectId: string | null
   activeGeometryIndex: number | null
   onCenterFeature: (featureId: string) => void
-  onSelectFeature: (featureId: string, objectId?: string | null) => void
+  onSelectFeature: (featureId: string, objectId?: string | null, options?: SelectFeatureOptions) => void
   onShowFeatureDetails: (() => void) | null
   onHeightChange: (featureId: string, height: number) => void
 }) {
@@ -3705,6 +3779,20 @@ const FeatureListRow = memo(function FeatureListRow({
     return counts
   }, [feature.errors])
 
+  const resolveSelectionMode = (event: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) => {
+    const hasPrimaryModifier = event.ctrlKey || event.metaKey
+    if (event.shiftKey && hasPrimaryModifier) {
+      return 'range-add' as const
+    }
+    if (event.shiftKey) {
+      return 'range' as const
+    }
+    if (hasPrimaryModifier) {
+      return 'toggle' as const
+    }
+    return 'replace' as const
+  }
+
   useEffect(() => {
     const element = rowRef.current
     if (!element) {
@@ -3723,23 +3811,25 @@ const FeatureListRow = memo(function FeatureListRow({
   }, [feature.id, onHeightChange])
 
   return (
-    <Collapsible open={selected}>
+    <Collapsible open={active}>
       <div
         ref={rowRef}
         aria-pressed={selected}
         style={{ minHeight: `max(${FEATURE_LIST_ROW_HEIGHT}px, 3.75rem)` }}
-        onClick={() => {
-          if (!selected) {
-            onSelectFeature(feature.id)
-          }
+        onClick={(event) => {
+          onSelectFeature(feature.id, undefined, {
+            selectionMode: resolveSelectionMode(event),
+          })
         }}
         className={cn(
           'w-full min-w-0 overflow-hidden rounded-sm border px-2.5 pt-2 transition focus-within:ring-2 focus-within:ring-accent/30',
-          !selected && 'cursor-pointer',
-          selected ? 'pb-2' : 'pb-1.5',
-          selected
+          !active && 'cursor-pointer',
+          active ? 'pb-2' : 'pb-1.5',
+          active
             ? 'border-accent/40 bg-accent/10 text-foreground shadow-[0_0_0_1px] shadow-accent/25'
-            : isInvalid
+            : selected
+              ? 'border-accent/25 bg-accent/6 text-foreground/86 hover:border-accent/35 hover:bg-accent/8'
+              : isInvalid
               ? 'border-destructive/20 bg-destructive/8 text-foreground/88 hover:border-destructive/28 hover:bg-destructive/12'
               : 'border-foreground/8 bg-foreground/3 text-foreground/78 hover:border-foreground/16 hover:bg-foreground/6',
         )}
@@ -3748,8 +3838,13 @@ const FeatureListRow = memo(function FeatureListRow({
           <CollapsibleTrigger asChild>
             <button
               type="button"
-              onClick={() => onSelectFeature(feature.id)}
-              className={cn('min-w-0 flex-1 text-left focus-visible:outline-none', !selected && 'cursor-pointer')}
+              onClick={(event) => {
+                event.stopPropagation()
+                onSelectFeature(feature.id, undefined, {
+                  selectionMode: resolveSelectionMode(event),
+                })
+              }}
+              className={cn('min-w-0 flex-1 text-left focus-visible:outline-none', !active && 'cursor-pointer')}
             >
               <div className="min-w-0 flex-1 overflow-hidden text-left">
                 <div className="flex flex-wrap items-center gap-1.5">
@@ -3766,7 +3861,7 @@ const FeatureListRow = memo(function FeatureListRow({
                         variant="outline"
                         className={cn(
                           'px-1.5 py-0 text-[10px]',
-                          selected
+                          active
                             ? 'border-accent/30 bg-accent/10 text-accent'
                             : isInvalid
                               ? 'border-destructive/30 bg-destructive/12 text-destructive'
@@ -3808,7 +3903,7 @@ const FeatureListRow = memo(function FeatureListRow({
           >
             <Crosshair className="size-3.5" />
           </Button>
-          {selected && onShowFeatureDetails && (
+          {active && onShowFeatureDetails && (
             <Button
               type="button"
               variant="ghost"
@@ -3831,7 +3926,7 @@ const FeatureListRow = memo(function FeatureListRow({
               activeObjectId={activeObjectId}
               activeGeometryIndex={activeGeometryIndex}
               errorCountsByObjectId={errorCountsByObjectId}
-              onSelectObject={(objectId) => onSelectFeature(feature.id, objectId)}
+              onSelectObject={(objectId) => onSelectFeature(feature.id, objectId, { selectionMode: 'preserve-if-selected' })}
             />
           </div>
         </CollapsibleContent>
@@ -3847,6 +3942,7 @@ const FeatureListPanel = memo(function FeatureListPanel({
   datasetFeatureCount,
   showDesktopHeading,
   searchQuery,
+  selectedFeatureIds,
   selectedFeatureId,
   showOnlyInvalidFeatures,
   onSearchQueryChange,
@@ -3864,12 +3960,13 @@ const FeatureListPanel = memo(function FeatureListPanel({
   datasetFeatureCount: number
   showDesktopHeading: boolean
   searchQuery: string
+  selectedFeatureIds: string[]
   selectedFeatureId: string | null
   showOnlyInvalidFeatures: boolean
   onSearchQueryChange: (event: ChangeEvent<HTMLInputElement>) => void
   onShowOnlyInvalidFeaturesChange: (checked: boolean) => void
   onCenterFeature: (featureId: string) => void
-  onSelectFeature: (featureId: string, objectId?: string | null) => void
+  onSelectFeature: (featureId: string, objectId?: string | null, options?: SelectFeatureOptions) => void
   onShowFeatureDetails: (() => void) | null
   onShowInfo: (() => void) | null
   activeObjectId: string | null
@@ -3877,6 +3974,7 @@ const FeatureListPanel = memo(function FeatureListPanel({
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const autoScrolledFeatureIdRef = useRef<string | null>(null)
+  const selectedFeatureIdSet = useMemo(() => new Set(selectedFeatureIds), [selectedFeatureIds])
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(0)
   const [rowHeights, setRowHeights] = useState<Map<string, number>>(() => new Map())
@@ -4060,7 +4158,8 @@ const FeatureListPanel = memo(function FeatureListPanel({
             {filteredFeatureItems.slice(startIndex, endIndex).map((item, visibleIndex) => {
               const itemIndex = startIndex + visibleIndex
               const top = rowLayout.rows[itemIndex]?.top ?? FEATURE_LIST_TOP_PADDING
-              const isSelected = item.feature.id === selectedFeatureId
+              const isSelected = selectedFeatureIdSet.has(item.feature.id)
+              const isActive = item.feature.id === selectedFeatureId
 
               return (
                 <div
@@ -4071,8 +4170,9 @@ const FeatureListPanel = memo(function FeatureListPanel({
                   <FeatureListRow
                     item={item}
                     selected={isSelected}
-                    activeObjectId={isSelected ? activeObjectId : null}
-                    activeGeometryIndex={isSelected ? activeGeometryIndex : null}
+                    active={isActive}
+                    activeObjectId={isActive ? activeObjectId : null}
+                    activeGeometryIndex={isActive ? activeGeometryIndex : null}
                     onCenterFeature={onCenterFeature}
                     onSelectFeature={onSelectFeature}
                     onShowFeatureDetails={onShowFeatureDetails}
