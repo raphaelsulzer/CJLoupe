@@ -179,6 +179,7 @@ type CityViewportProps = {
   } | null) => void
   onVertexCommit: (featureId: string, vertices: Vec3[]) => void
   onViewportCenterChange: (center: Vec3 | null) => void
+  onRebuildProgress: (progress: { current: number; total: number } | null) => void
   theme: Theme
 }
 
@@ -597,6 +598,7 @@ function CityViewport({
   onSelectSemanticSurface,
   onVertexCommit,
   onViewportCenterChange,
+  onRebuildProgress,
   theme,
 }: CityViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -637,6 +639,7 @@ function CityViewport({
   const onSelectSemanticSurfaceRef = useRef(onSelectSemanticSurface)
   const onVertexCommitRef = useRef(onVertexCommit)
   const onViewportCenterChangeRef = useRef(onViewportCenterChange)
+  const onRebuildProgressRef = useRef(onRebuildProgress)
   const themeRef = useRef(theme)
   const showSemanticSurfacesRef = useRef(showSemanticSurfaces)
   const attributeColorRef = useRef(attributeColor)
@@ -678,6 +681,7 @@ function CityViewport({
   useEffect(() => { onSelectSemanticSurfaceRef.current = onSelectSemanticSurface }, [onSelectSemanticSurface])
   useEffect(() => { onVertexCommitRef.current = onVertexCommit }, [onVertexCommit])
   useEffect(() => { onViewportCenterChangeRef.current = onViewportCenterChange }, [onViewportCenterChange])
+  useEffect(() => { onRebuildProgressRef.current = onRebuildProgress }, [onRebuildProgress])
   useEffect(() => { themeRef.current = theme }, [theme])
   useEffect(() => { showSemanticSurfacesRef.current = showSemanticSurfaces }, [showSemanticSurfaces])
   useEffect(() => { attributeColorRef.current = attributeColor }, [attributeColor])
@@ -1122,6 +1126,12 @@ function CityViewport({
       }
 
       const handle = activeRuntime.transformProxy
+      if (!activeRuntime.featureDrafts.has(featureId)) {
+        const selectedFeature = currentData.features.find((f) => f.id === featureId)
+        if (selectedFeature) {
+          activeRuntime.featureDrafts.set(featureId, selectedFeature.vertices.map((v) => [...v] as Vec3))
+        }
+      }
       const draftVertices = activeRuntime.featureDrafts.get(featureId)
       if (!handle || !draftVertices) {
         return
@@ -1185,25 +1195,37 @@ function CityViewport({
       return
     }
 
-    rebuildScene(runtime, data, selectionRef.current)
-    const datasetKey = getDatasetViewKey(data)
-    if (fittedDatasetKeyRef.current !== datasetKey) {
-      fitCameraToDataset(runtime, data)
-      fittedDatasetKeyRef.current = datasetKey
+    const signal = { cancelled: false }
+    onRebuildProgressRef.current({ current: 0, total: data.features.length })
+
+    void rebuildScene(runtime, data, selectionRef.current, signal, (current, total) => {
+      onRebuildProgressRef.current({ current, total })
+    }).then(() => {
+      if (signal.cancelled) return
+      onRebuildProgressRef.current(null)
+      const datasetKey = getDatasetViewKey(data)
+      if (fittedDatasetKeyRef.current !== datasetKey) {
+        fitCameraToDataset(runtime, data)
+        fittedDatasetKeyRef.current = datasetKey
+      }
+      rebuildAnnotations(runtime)
+      syncSelection(
+        runtime,
+        data,
+        selectionRef.current,
+        hideOccludedEditEdgesRef.current,
+        isolateSelectedFeatureRef.current,
+        showVertexGizmoRef.current,
+      )
+      previousSelectionRef.current = selectionRef.current
+      previousIsolateSelectedFeatureRef.current = isolateSelectedFeatureRef.current
+      renderViewport(runtime)
+      reportViewportCenter(runtime, data, onViewportCenterChangeRef.current)
+    })
+
+    return () => {
+      signal.cancelled = true
     }
-    rebuildAnnotations(runtime)
-    syncSelection(
-      runtime,
-      data,
-      selectionRef.current,
-      hideOccludedEditEdgesRef.current,
-      isolateSelectedFeatureRef.current,
-      showVertexGizmoRef.current,
-    )
-    previousSelectionRef.current = selectionRef.current
-    previousIsolateSelectedFeatureRef.current = isolateSelectedFeatureRef.current
-    renderViewport(runtime)
-    reportViewportCenter(runtime, data, onViewportCenterChangeRef.current)
   }, [data])
 
   useEffect(() => {
@@ -1514,18 +1536,18 @@ function resolveDisplayedObjectGeometry(
   return resolveObjectGeometry(object, selection.geometryDisplayMode, activeGeometryOverride)
 }
 
-function rebuildScene(
+async function rebuildScene(
   runtime: Runtime,
   data: ViewerDataset,
   selection: ViewSelection,
+  signal: { cancelled: boolean },
+  onProgress: (current: number, total: number) => void,
 ) {
   disposeSceneContents(runtime)
   runtime.shaderObjectIdsByObjectKey.clear()
   runtime.nextShaderObjectId = 1
   syncSemanticSurfaceSharedUniforms(runtime, data)
-  runtime.featureDrafts = new Map(
-    data.features.map((feature) => [feature.id, feature.vertices.map((vertex) => [...vertex] as Vec3)]),
-  )
+  runtime.featureDrafts = new Map()
 
   const sizeX = data.extent[3] - data.extent[0]
   const sizeY = data.extent[4] - data.extent[1]
@@ -1533,11 +1555,25 @@ function rebuildScene(
   runtime.sceneScale = Math.max(sizeX, sizeY, sizeZ)
   const batchItems: BatchBuildItem[] = []
 
-  for (const feature of data.features) {
-    const draftVertices = runtime.featureDrafts.get(feature.id)
-    if (!draftVertices) {
-      continue
+  const total = data.features.length
+  const YIELD_EVERY = 20
+  const FLUSH_EVERY = 500
+
+  for (let featureIndex = 0; featureIndex < total; featureIndex++) {
+    if (signal.cancelled) return
+
+    if (featureIndex > 0 && featureIndex % YIELD_EVERY === 0) {
+      if (batchItems.length >= FLUSH_EVERY) {
+        buildSpatialBatches(runtime, data, batchItems, selection)
+        batchItems.length = 0
+      }
+      onProgress(featureIndex, total)
+      await new Promise<void>((resolve) => setTimeout(resolve, 0))
+      if (signal.cancelled) return
     }
+
+    const feature = data.features[featureIndex]
+    const draftVertices = runtime.featureDrafts.get(feature.id) ?? feature.vertices
 
     // Center each feature's mesh geometry around the feature's own center
     // to keep float32 vertex buffer values small and avoid GPU precision jitter.
@@ -1608,6 +1644,7 @@ function rebuildScene(
     }
   }
 
+  if (signal.cancelled) return
   buildSpatialBatches(runtime, data, batchItems, selection)
   syncBatchedAttributeValueTexture(runtime, runtime.attributeColor)
 }
@@ -1983,7 +2020,7 @@ function rebuildFeatureGeometry(
   changedVertexIndex?: number,
 ) {
   const feature = data.features.find((candidate) => candidate.id === featureId)
-  const vertices = runtime.featureDrafts.get(featureId)
+  const vertices = runtime.featureDrafts.get(featureId) ?? feature?.vertices
   if (!feature || !vertices) {
     return
   }
@@ -3335,7 +3372,7 @@ function rebuildHandles(
     ? resolveDisplayedObjectGeometry(feature, object, selection)
     : null
   const draftVertices = selection.selectedFeatureId
-    ? runtime.featureDrafts.get(selection.selectedFeatureId)
+    ? (runtime.featureDrafts.get(selection.selectedFeatureId) ?? feature?.vertices)
     : undefined
 
   if (!feature || !object || !objectGeometry || !draftVertices) {
@@ -3422,7 +3459,7 @@ function rebuildEditWireframe(
   const objectGeometry = feature && object
     ? resolveDisplayedObjectGeometry(feature, object, selection)
     : null
-  const draftVertices = runtime.featureDrafts.get(selection.selectedFeatureId)
+  const draftVertices = runtime.featureDrafts.get(selection.selectedFeatureId) ?? feature?.vertices
 
   if (!feature || !object || !objectGeometry || !draftVertices) {
     return
@@ -3718,7 +3755,7 @@ function syncEditPointGeometry(
   const objectGeometry = feature && object
     ? resolveDisplayedObjectGeometry(feature, object, selection)
     : null
-  const draftVertices = runtime.featureDrafts.get(selection.selectedFeatureId)
+  const draftVertices = runtime.featureDrafts.get(selection.selectedFeatureId) ?? feature?.vertices
   if (!feature || !object || !objectGeometry || !draftVertices) {
     return
   }
@@ -5016,7 +5053,7 @@ function findNearestEditVertexIndexOnScreen(
   const objectGeometry = feature && object
     ? resolveDisplayedObjectGeometry(feature, object, selection)
     : null
-  const draftVertices = runtime.featureDrafts.get(selection.selectedFeatureId)
+  const draftVertices = runtime.featureDrafts.get(selection.selectedFeatureId) ?? feature?.vertices
   if (!objectGeometry || !draftVertices) {
     return null
   }

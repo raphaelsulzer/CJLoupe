@@ -80,6 +80,7 @@ import {
   loadValidationReportFromFile,
   loadValidationReportFromUrl,
   mergeValidationAnnotations,
+  mergeViewerDatasets,
 } from '@/lib/cityjson'
 import { cn, viewerObjectKey } from '@/lib/utils'
 import type {
@@ -225,6 +226,8 @@ function App() {
   const [dataset, setDataset] = useState<ViewerDataset | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [loadingProgress, setLoadingProgress] = useState<{ current: number; total: number } | null>(null)
+  const [renderingProgress, setRenderingProgress] = useState<{ current: number; total: number } | null>(null)
   const [isPaneCollapsed, setIsPaneCollapsed] = useState(false)
   const [editMode, setEditMode] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -761,20 +764,41 @@ function App() {
     return () => window.removeEventListener('keydown', handleEscape)
   }, [isChangelogDialogOpen])
 
-  async function openCityJsonFile(file: File) {
+  async function openCityJsonFiles(files: File[]) {
     setIsLoading(true)
     setError(null)
     setIsFileDialogOpen(false)
+    if (files.length > 1) setLoadingProgress({ current: 0, total: files.length })
 
     try {
-      const nextDataset = await loadCityJsonFromFile(file)
-      applyDataset(nextDataset)
+      const datasets: ViewerDataset[] = []
+      const failedNames: string[] = []
+
+      for (let i = 0; i < files.length; i++) {
+        if (files.length > 1) setLoadingProgress({ current: i + 1, total: files.length })
+        try {
+          datasets.push(await loadCityJsonFromFile(files[i]))
+        } catch {
+          failedNames.push(files[i].name)
+        }
+      }
+
+      if (datasets.length === 0) {
+        throw new Error('None of the selected files could be loaded.')
+      }
+
+      applyDataset(mergeViewerDatasets(datasets))
       setAnnotationSourceName(null)
+
+      if (failedNames.length > 0) {
+        setError(`${failedNames.length} file(s) could not be loaded: ${failedNames.join(', ')}`)
+      }
     } catch (caughtError) {
       const message = caughtError instanceof Error ? caughtError.message : 'Failed to parse selected file.'
       setError(message)
     } finally {
       setIsLoading(false)
+      setLoadingProgress(null)
     }
   }
 
@@ -845,8 +869,8 @@ function App() {
   }
 
   function handleFileSelection(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0]
-    if (file) void openCityJsonFile(file)
+    const files = Array.from(event.target.files ?? []).filter((f) => isCityJsonFileName(f.name.toLowerCase()))
+    if (files.length > 0) void openCityJsonFiles(files)
     event.target.value = ''
   }
 
@@ -862,27 +886,27 @@ function App() {
     const files = Array.from(event.dataTransfer.files)
     if (files.length === 0) return
 
-    let cityFile: File | null = null
+    const cityFiles: File[] = []
     let reportFile: File | null = null
 
     for (const file of files) {
       const name = file.name.toLowerCase()
       if (isCityJsonFileName(name)) {
-        cityFile = file
+        cityFiles.push(file)
       } else if (name.endsWith('.json')) {
         reportFile = file
       }
     }
 
-    if (cityFile && reportFile) {
-      void openCityJsonAndReport(cityFile, reportFile)
-    } else if (cityFile) {
-      void openCityJsonFile(cityFile)
+    if (cityFiles.length === 1 && reportFile) {
+      void openCityJsonAndReport(cityFiles[0], reportFile)
+    } else if (cityFiles.length > 0) {
+      void openCityJsonFiles(cityFiles)
     } else if (reportFile) {
       if (dataset) {
         void openAnnotationFile(reportFile)
       } else {
-        void openCityJsonFile(reportFile)
+        void openCityJsonFiles([reportFile])
       }
     }
   }
@@ -2383,6 +2407,7 @@ function App() {
             onSelectSemanticSurface={handleSelectSemanticSurface}
             onVertexCommit={applyFeatureVertices}
             onViewportCenterChange={setViewportCenter}
+            onRebuildProgress={setRenderingProgress}
             theme={theme}
           />
         </Suspense>
@@ -2558,6 +2583,7 @@ function App() {
         ref={fileInputRef}
         type="file"
         accept=".json,.city.json,.cityjson,.jsonl,.city.jsonl"
+        multiple
         className="hidden"
         onChange={handleFileSelection}
       />
@@ -2700,17 +2726,43 @@ function App() {
         </div>
       )}
 
-      {isLoading && (
+      {(isLoading || renderingProgress !== null) && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/42 backdrop-blur-md">
           <div className="w-full max-w-lg rounded-sm border border-border/40 bg-background p-5 shadow-[0_28px_100px_rgb(0_0_0_/_0.28)]">
             <div className="flex items-start gap-4">
               <div className="min-w-0 flex-1">
                 <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-primary">
-                  Loading
+                  {renderingProgress ? 'Rendering' : 'Loading'}
                 </p>
-                <p className="mt-2 text-sm leading-6 text-foreground/92">
-                  Loading...
-                </p>
+                {loadingProgress ? (
+                  <>
+                    <p className="mt-2 text-sm leading-6 text-foreground/92">
+                      Loading file {loadingProgress.current} / {loadingProgress.total}
+                    </p>
+                    <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-border/40">
+                      <div
+                        className="h-full rounded-full bg-primary transition-all duration-200"
+                        style={{ width: `${(loadingProgress.current / loadingProgress.total) * 100}%` }}
+                      />
+                    </div>
+                  </>
+                ) : renderingProgress ? (
+                  <>
+                    <p className="mt-2 text-sm leading-6 text-foreground/92">
+                      Rendering feature {renderingProgress.current} / {renderingProgress.total}
+                    </p>
+                    <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-border/40">
+                      <div
+                        className="h-full rounded-full bg-primary transition-all duration-200"
+                        style={{ width: `${(renderingProgress.current / renderingProgress.total) * 100}%` }}
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <p className="mt-2 text-sm leading-6 text-foreground/92">
+                    Loading...
+                  </p>
+                )}
               </div>
             </div>
           </div>

@@ -487,6 +487,50 @@ export function mergeValidationAnnotations(
   }
 }
 
+export function mergeViewerDatasets(datasets: ViewerDataset[]): ViewerDataset {
+  if (datasets.length === 1) return datasets[0]
+
+  const allFeatures: ViewerFeature[] = []
+  for (let i = 0; i < datasets.length; i++) {
+    for (const feature of datasets[i].features) {
+      allFeatures.push({ ...feature, id: `${i}::${feature.id}` })
+    }
+  }
+
+  if (allFeatures.length === 0) {
+    throw new Error('No renderable CityJSON features were found.')
+  }
+
+  allFeatures.sort((left, right) => left.label.localeCompare(right.label, undefined, { numeric: true }))
+
+  const globalMin: Vec3 = [Infinity, Infinity, Infinity]
+  const globalMax: Vec3 = [-Infinity, -Infinity, -Infinity]
+  for (const feature of allFeatures) {
+    updateGlobalExtent(globalMin, globalMax, feature.extent)
+  }
+
+  const extent: ViewerDataset['extent'] = [
+    globalMin[0], globalMin[1], globalMin[2],
+    globalMax[0], globalMax[1], globalMax[2],
+  ]
+  const center: Vec3 = [
+    (extent[0] + extent[3]) / 2,
+    (extent[1] + extent[4]) / 2,
+    (extent[2] + extent[5]) / 2,
+  ]
+
+  return {
+    sourceName: `${datasets.length} files`,
+    center,
+    extent,
+    features: allFeatures,
+    cityJsonVersion: datasets[0].cityJsonVersion,
+    cityJsonKind: 'CityJSONFeatures',
+    transform: null,
+    metadata: null,
+  }
+}
+
 function createRenderableObjects(cityObjects: Record<string, CityJsonObject>) {
   const objects = Object.entries(cityObjects).map(([id, object]) => {
     const geometries = extractRenderableGeometries(object.geometry ?? [])
