@@ -34,6 +34,9 @@ bun run build
 bun run lint
 ```
 
+To run exec:
+```npm run dev```
+
 ## Data Loading
 
 The app loads a bundled sample on startup and also supports local files.

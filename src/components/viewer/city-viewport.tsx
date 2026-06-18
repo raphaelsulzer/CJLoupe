@@ -263,7 +263,6 @@ type BatchedObjectRecord = {
   baseColorLight: string
   baseColorDark: string
   triangleFaceIndices: TriangleFaceIndices
-  blueprint: ObjectGeometryBlueprint
   batch: THREE.BatchedMesh
   instanceId: number
   geometryId: number
@@ -1623,7 +1622,6 @@ async function rebuildScene(
           baseColorLight: baseColorForType(object.type, 'light'),
           baseColorDark: baseColorForType(object.type, 'dark'),
           triangleFaceIndices: geometry.userData.triangleFaceIndices,
-          blueprint,
           geometry,
           tileKey: getBatchTileKey(featureCenter, data),
           vertexCount: geometry.getAttribute('position')?.count ?? 0,
@@ -1893,7 +1891,6 @@ function buildSpatialBatches(
         baseColorLight: item.baseColorLight,
         baseColorDark: item.baseColorDark,
         triangleFaceIndices: item.triangleFaceIndices,
-        blueprint: item.blueprint,
         batch,
         instanceId,
         geometryId,
@@ -2072,7 +2069,6 @@ function rebuildFeatureGeometry(
       try {
         batchedRecord.batch.setGeometryAt(batchedRecord.geometryId, nextGeometry)
         batchedRecord.triangleFaceIndices = nextGeometry.userData.triangleFaceIndices
-        batchedRecord.blueprint = nextBlueprint
         batchedRecord.geometryIndex = objectGeometry.index
         batchedRecord.batch.computeBoundingSphere()
         batchedRecord.batch.computeBoundingBox()
@@ -2194,7 +2190,6 @@ function updateObjectSurfacePresentation(
     try {
       batchedRecord.batch.setGeometryAt(batchedRecord.geometryId, batchGeometry)
       batchedRecord.triangleFaceIndices = batchGeometry.userData.triangleFaceIndices
-      batchedRecord.blueprint = blueprint
       batchedRecord.geometryIndex = objectGeometry.index
       batchedRecord.batch.computeBoundingSphere()
       batchedRecord.batch.computeBoundingBox()
@@ -2922,7 +2917,18 @@ function syncSelectionOutlineProxy(
 
       const batchedRecord = runtime.batchedObjectsByObjectKey.get(objectKey)
       if (batchedRecord) {
-        const blueprint = batchedRecord.blueprint
+        const draftVertices = runtime.featureDrafts.get(feature.id) ?? feature.vertices
+        const blueprint = buildObjectGeometryBlueprint(
+          objectGeometry.polygons,
+          draftVertices,
+          featureCenter,
+          collectObjectErrorFaceIndices(
+            feature.errors,
+            object.id,
+            objectGeometry.index,
+            objectGeometry.sourceFaceIndices,
+          ),
+        )
 
         if (hasSelectedFace) {
           const outlineGeometry = buildUngroupedObjectGeometry({
