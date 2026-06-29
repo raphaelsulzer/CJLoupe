@@ -1245,39 +1245,55 @@ function CityViewport({
     previousActiveGeometryIndexRef.current = activeGeometryIndex
 
     if (displayModeChanged || activeGeometryChanged) {
-      rebuildScene(runtime, currentData, selectionRef.current)
-      rebuildAnnotations(runtime)
-      syncSelection(
-        runtime,
-        currentData,
-        selectionRef.current,
-        hideOccludedEditEdgesRef.current,
-        isolateSelectedFeatureRef.current,
-        showVertexGizmoRef.current,
-      )
-    } else {
-      const selection = selectionRef.current
-      if (selection.selectedFeatureId) {
-        const feature = currentData.features.find((candidate) => candidate.id === selection.selectedFeatureId)
-        if (feature) {
-          runtime.featureDrafts.set(
-            feature.id,
-            feature.vertices.map((vertex) => [...vertex] as Vec3),
-          )
-          rebuildFeatureGeometry(runtime, currentData, feature.id, selection)
-        }
+      const signal = { cancelled: false }
+      onRebuildProgressRef.current({ current: 0, total: currentData.features.length })
+
+      void rebuildScene(runtime, currentData, selectionRef.current, signal, (current, total) => {
+        onRebuildProgressRef.current({ current, total })
+      }).then(() => {
+        if (signal.cancelled) return
+        onRebuildProgressRef.current(null)
+        rebuildAnnotations(runtime)
+        syncSelection(
+          runtime,
+          currentData,
+          selectionRef.current,
+          hideOccludedEditEdgesRef.current,
+          isolateSelectedFeatureRef.current,
+          showVertexGizmoRef.current,
+        )
+        previousSelectionRef.current = selectionRef.current
+        previousIsolateSelectedFeatureRef.current = isolateSelectedFeatureRef.current
+        renderViewport(runtime)
+        reportViewportCenter(runtime, currentData, onViewportCenterChangeRef.current)
+      })
+
+      return () => {
+        signal.cancelled = true
       }
-      syncSelectionDelta(
-        runtime,
-        currentData,
-        selection,
-        selection,
-        hideOccludedEditEdgesRef.current,
-        isolateSelectedFeatureRef.current,
-        isolateSelectedFeatureRef.current,
-        showVertexGizmoRef.current,
-      )
     }
+
+    const selection = selectionRef.current
+    if (selection.selectedFeatureId) {
+      const feature = currentData.features.find((candidate) => candidate.id === selection.selectedFeatureId)
+      if (feature) {
+        runtime.featureDrafts.set(
+          feature.id,
+          feature.vertices.map((vertex) => [...vertex] as Vec3),
+        )
+        rebuildFeatureGeometry(runtime, currentData, feature.id, selection)
+      }
+    }
+    syncSelectionDelta(
+      runtime,
+      currentData,
+      selection,
+      selection,
+      hideOccludedEditEdgesRef.current,
+      isolateSelectedFeatureRef.current,
+      isolateSelectedFeatureRef.current,
+      showVertexGizmoRef.current,
+    )
 
     previousSelectionRef.current = selectionRef.current
     previousIsolateSelectedFeatureRef.current = isolateSelectedFeatureRef.current
@@ -1379,12 +1395,34 @@ function CityViewport({
       const selection = selectionRef.current
       const needsRebuild = shouldRebuildForSemanticModeToggle(runtime, currentData, selection, showSemanticSurfaces)
       if (needsRebuild) {
-        rebuildScene(runtime, currentData, selection)
-        rebuildAnnotations(runtime)
-      } else {
-        syncSemanticSurfaceSharedUniforms(runtime, currentData)
-        syncBatchMaterials(runtime)
+        const signal = { cancelled: false }
+        onRebuildProgressRef.current({ current: 0, total: currentData.features.length })
+
+        void rebuildScene(runtime, currentData, selection, signal, (current, total) => {
+          onRebuildProgressRef.current({ current, total })
+        }).then(() => {
+          if (signal.cancelled) return
+          onRebuildProgressRef.current(null)
+          rebuildAnnotations(runtime)
+          syncSelection(
+            runtime,
+            currentData,
+            selection,
+            hideOccludedEditEdgesRef.current,
+            isolateSelectedFeatureRef.current,
+            showVertexGizmoRef.current,
+          )
+          renderViewport(runtime)
+          reportViewportCenter(runtime, currentData, onViewportCenterChangeRef.current)
+        })
+
+        return () => {
+          signal.cancelled = true
+        }
       }
+
+      syncSemanticSurfaceSharedUniforms(runtime, currentData)
+      syncBatchMaterials(runtime)
       syncSelection(
         runtime,
         currentData,
