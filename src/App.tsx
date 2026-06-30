@@ -80,8 +80,9 @@ import {
   loadValidationReportFromFile,
   loadValidationReportFromUrl,
   mergeValidationAnnotations,
-  mergeViewerDatasets,
+  streamCityJsonFeaturesFromFile,
 } from '@/lib/cityjson'
+import type { CityViewportHandle } from '@/components/viewer/city-viewport'
 import { cn, viewerObjectKey } from '@/lib/utils'
 import type {
   PolygonRings,
@@ -217,6 +218,8 @@ type FeatureListItem = {
 function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const annotationInputRef = useRef<HTMLInputElement>(null)
+  const viewportHandleRef = useRef<CityViewportHandle | null>(null)
+  const [loadedFiles, setLoadedFiles] = useState<File[]>([])
   const originalVerticesRef = useRef<Map<string, Vec3[]>>(new Map())
   const originalObjectGeometriesRef = useRef<Map<string, Map<string, ViewerObjectGeometry[]>>>(new Map())
   const attributeColorDomainsByKeyRef = useRef<Map<string, AttributeColorDomain>>(new Map())
@@ -768,35 +771,225 @@ function App() {
     setIsLoading(true)
     setError(null)
     setIsFileDialogOpen(false)
-    if (files.length > 1) setLoadingProgress({ current: 0, total: files.length })
+
+    if (files.length === 1) {
+      // Single file: use the original path — keeps geometry in memory for instant LOD switching
+      setLoadingProgress(null)
+      try {
+        const dataset = await loadCityJsonFromFile(files[0])
+        applyDataset(dataset)
+        setAnnotationSourceName(null)
+        setLoadedFiles(files)
+      } catch (caughtError) {
+        const message = caughtError instanceof Error ? caughtError.message : 'Failed to parse selected file.'
+        setError(message)
+      } finally {
+        setIsLoading(false)
+      }
+      return
+    }
+
+    // Multiple files: streaming incremental build to avoid holding all file data in RAM
+    setLoadingProgress({ current: 0, total: files.length })
 
     try {
-      const datasets: ViewerDataset[] = []
+      // Quick header scan to get the estimated center for float32 precision
+      const translates: Vec3[] = []
+      for (const file of files) {
+        try {
+          const chunk = await file.slice(0, 4096).text()
+          const firstNl = chunk.indexOf('\n')
+          const headerText = firstNl >= 0 ? chunk.slice(0, firstNl) : chunk
+          const header = JSON.parse(headerText) as { transform?: { translate?: number[] } }
+          const t = header.transform?.translate
+          if (Array.isArray(t) && t.length >= 3) {
+            translates.push([t[0] ?? 0, t[1] ?? 0, t[2] ?? 0])
+          }
+        } catch { /* ignore bad headers */ }
+      }
+      const estimatedCenter: Vec3 = translates.length > 0
+        ? [
+            translates.reduce((s, t) => s + t[0], 0) / translates.length,
+            translates.reduce((s, t) => s + t[1], 0) / translates.length,
+            translates.reduce((s, t) => s + t[2], 0) / translates.length,
+          ]
+        : [0, 0, 0]
+
+      viewportHandleRef.current?.beginSceneBuild(estimatedCenter, files.length * 14000)
+
+      const globalMin: Vec3 = [Infinity, Infinity, Infinity]
+      const globalMax: Vec3 = [-Infinity, -Infinity, -Infinity]
+      let totalFeatureCount = 0
+      const allFeatures: ViewerFeature[] = []
       const failedNames: string[] = []
+      let firstMeta: { cityJsonVersion: string | null } | null = null
 
       for (let i = 0; i < files.length; i++) {
-        if (files.length > 1) setLoadingProgress({ current: i + 1, total: files.length })
+        setLoadingProgress({ current: i + 1, total: files.length })
+        const chunkBuffer: ViewerFeature[] = []
+
         try {
-          datasets.push(await loadCityJsonFromFile(files[i]))
+          const meta = await streamCityJsonFeaturesFromFile(files[i], async (feature) => {
+            feature.id = `${i}::${feature.id}`
+            chunkBuffer.push(feature)
+            totalFeatureCount++
+            globalMin[0] = Math.min(globalMin[0], feature.extent[0])
+            globalMin[1] = Math.min(globalMin[1], feature.extent[1])
+            globalMin[2] = Math.min(globalMin[2], feature.extent[2])
+            globalMax[0] = Math.max(globalMax[0], feature.extent[3])
+            globalMax[1] = Math.max(globalMax[1], feature.extent[4])
+            globalMax[2] = Math.max(globalMax[2], feature.extent[5])
+
+            if (chunkBuffer.length >= 500) {
+              const runningExtent: ViewerDataset['extent'] = [
+                globalMin[0], globalMin[1], globalMin[2],
+                globalMax[0], globalMax[1], globalMax[2],
+              ]
+              await viewportHandleRef.current?.addFeatureChunk(chunkBuffer, runningExtent, totalFeatureCount)
+              for (const f of chunkBuffer) releaseFeatureGeometry(f)
+              allFeatures.push(...chunkBuffer)
+              chunkBuffer.length = 0
+            }
+          })
+          firstMeta ??= meta
+
+          if (chunkBuffer.length > 0) {
+            const runningExtent: ViewerDataset['extent'] = [
+              globalMin[0], globalMin[1], globalMin[2],
+              globalMax[0], globalMax[1], globalMax[2],
+            ]
+            await viewportHandleRef.current?.addFeatureChunk(chunkBuffer, runningExtent, totalFeatureCount)
+            for (const f of chunkBuffer) releaseFeatureGeometry(f)
+            allFeatures.push(...chunkBuffer)
+            chunkBuffer.length = 0
+          }
         } catch {
           failedNames.push(files[i].name)
+          for (const f of chunkBuffer) releaseFeatureGeometry(f)
         }
       }
 
-      if (datasets.length === 0) {
+      if (allFeatures.length === 0) {
         throw new Error('None of the selected files could be loaded.')
       }
 
-      applyDataset(mergeViewerDatasets(datasets))
+      const extent: ViewerDataset['extent'] = [
+        globalMin[0], globalMin[1], globalMin[2],
+        globalMax[0], globalMax[1], globalMax[2],
+      ]
+      const finalDataset: ViewerDataset = {
+        sourceName: `${files.length} files`,
+        features: allFeatures,
+        extent,
+        center: estimatedCenter,
+        cityJsonVersion: firstMeta?.cityJsonVersion ?? null,
+        cityJsonKind: 'CityJSONFeatures',
+        transform: null,
+        metadata: null,
+      }
+
+      viewportHandleRef.current?.finalizeSceneBuild(finalDataset)
+      applyDataset(finalDataset, { resetViewport: false })
       setAnnotationSourceName(null)
+      setLoadedFiles(files)
 
       if (failedNames.length > 0) {
         setError(`${failedNames.length} file(s) could not be loaded: ${failedNames.join(', ')}`)
       }
     } catch (caughtError) {
-      const message = caughtError instanceof Error ? caughtError.message : 'Failed to parse selected file.'
+      const message = caughtError instanceof Error ? caughtError.message : 'Failed to parse selected files.'
       setError(message)
     } finally {
+      setIsLoading(false)
+      setLoadingProgress(null)
+    }
+  }
+
+  function releaseFeatureGeometry(feature: ViewerFeature) {
+    feature.vertices = []
+    for (const obj of feature.objects) {
+      for (const geom of obj.geometries) {
+        geom.polygons = []
+        geom.vertexIndices = []
+        geom.sourceFaceIndices = []
+      }
+    }
+  }
+
+  async function reloadAndRebuildFromFiles(files: File[], currentDataset: ViewerDataset) {
+    setIsLoading(true)
+    setLoadingProgress({ current: 0, total: files.length })
+
+    try {
+      // Re-scan headers for center (same as initial load)
+      const translates: Vec3[] = []
+      for (const file of files) {
+        try {
+          const chunk = await file.slice(0, 4096).text()
+          const firstNl = chunk.indexOf('\n')
+          const headerText = firstNl >= 0 ? chunk.slice(0, firstNl) : chunk
+          const header = JSON.parse(headerText) as { transform?: { translate?: number[] } }
+          const t = header.transform?.translate
+          if (Array.isArray(t) && t.length >= 3) {
+            translates.push([t[0] ?? 0, t[1] ?? 0, t[2] ?? 0])
+          }
+        } catch { /* ignore */ }
+      }
+      const estimatedCenter: Vec3 = translates.length > 0
+        ? [
+            translates.reduce((s, t) => s + t[0], 0) / translates.length,
+            translates.reduce((s, t) => s + t[1], 0) / translates.length,
+            translates.reduce((s, t) => s + t[2], 0) / translates.length,
+          ]
+        : currentDataset.center
+
+      viewportHandleRef.current?.beginSceneBuild(estimatedCenter, currentDataset.features.length)
+
+      const globalMin: Vec3 = [Infinity, Infinity, Infinity]
+      const globalMax: Vec3 = [-Infinity, -Infinity, -Infinity]
+      let totalFeatureCount = 0
+
+      for (let i = 0; i < files.length; i++) {
+        setLoadingProgress({ current: i + 1, total: files.length })
+        const chunkBuffer: ViewerFeature[] = []
+
+        try {
+          await streamCityJsonFeaturesFromFile(files[i], async (feature) => {
+            feature.id = `${i}::${feature.id}`
+            chunkBuffer.push(feature)
+            totalFeatureCount++
+            globalMin[0] = Math.min(globalMin[0], feature.extent[0])
+            globalMin[1] = Math.min(globalMin[1], feature.extent[1])
+            globalMin[2] = Math.min(globalMin[2], feature.extent[2])
+            globalMax[0] = Math.max(globalMax[0], feature.extent[3])
+            globalMax[1] = Math.max(globalMax[1], feature.extent[4])
+            globalMax[2] = Math.max(globalMax[2], feature.extent[5])
+
+            if (chunkBuffer.length >= 500) {
+              const runningExtent: ViewerDataset['extent'] = [
+                globalMin[0], globalMin[1], globalMin[2],
+                globalMax[0], globalMax[1], globalMax[2],
+              ]
+              await viewportHandleRef.current?.addFeatureChunk(chunkBuffer, runningExtent, totalFeatureCount)
+              for (const f of chunkBuffer) releaseFeatureGeometry(f)
+              chunkBuffer.length = 0
+            }
+          })
+
+          if (chunkBuffer.length > 0) {
+            const runningExtent: ViewerDataset['extent'] = [
+              globalMin[0], globalMin[1], globalMin[2],
+              globalMax[0], globalMax[1], globalMax[2],
+            ]
+            await viewportHandleRef.current?.addFeatureChunk(chunkBuffer, runningExtent, totalFeatureCount)
+            for (const f of chunkBuffer) releaseFeatureGeometry(f)
+            chunkBuffer.length = 0
+          }
+        } catch { /* skip failed file */ }
+      }
+
+      viewportHandleRef.current?.finalizeSceneBuild(currentDataset)
+    } catch { /* ignore rebuild errors */ } finally {
       setIsLoading(false)
       setLoadingProgress(null)
     }
@@ -933,7 +1126,7 @@ function App() {
     }
   }
 
-  const resetViewerState = useCallback(() => {
+  const resetViewerState = useCallback(({ resetViewport = true }: { resetViewport?: boolean } = {}) => {
     setCameraFocalLength(DEFAULT_CAMERA_FOCAL_LENGTH)
     setGeometryDisplayMode({ kind: 'best' })
     setActiveGeometryIndex(null)
@@ -957,13 +1150,15 @@ function App() {
     setAttributeNominalColorSeed(0)
     setCustomNominalColorMaps({})
     attributeColorDomainsByKeyRef.current = new Map()
-    setViewportResetRevision((current) => current + 1)
+    if (resetViewport) {
+      setViewportResetRevision((current) => current + 1)
+    }
   }, [])
 
-  const applyDataset = useCallback((nextDataset: ViewerDataset) => {
+  const applyDataset = useCallback((nextDataset: ViewerDataset, { resetViewport = true }: { resetViewport?: boolean } = {}) => {
     originalVerticesRef.current = new Map()
     originalObjectGeometriesRef.current = new Map()
-    resetViewerState()
+    resetViewerState({ resetViewport })
     setDataset(nextDataset)
 
     const firstFeature = nextDataset.features[0] ?? null
@@ -2408,6 +2603,13 @@ function App() {
             onVertexCommit={applyFeatureVertices}
             onViewportCenterChange={setViewportCenter}
             onRebuildProgress={setRenderingProgress}
+            handleRef={viewportHandleRef}
+            onNeedsFileReload={() => {
+              const currentDataset = dataset
+              if (loadedFiles.length > 0 && currentDataset) {
+                void reloadAndRebuildFromFiles(loadedFiles, currentDataset)
+              }
+            }}
             theme={theme}
           />
         </Suspense>

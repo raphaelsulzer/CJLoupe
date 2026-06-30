@@ -180,6 +180,102 @@ export function parseCityJson(text: string, sourceName: string): ViewerDataset {
   return parseCityJsonSequence(text, sourceName)
 }
 
+export type StreamedFileMeta = {
+  cityJsonVersion: string | null
+  cityJsonKind: 'CityJSONFeatures'
+  transform: { scale: Vec3; translate: Vec3 } | null
+  metadata: Record<string, unknown> | null
+}
+
+export async function streamCityJsonFeaturesFromFile(
+  file: File,
+  onFeature: (feature: ViewerFeature) => void | Promise<void>,
+): Promise<StreamedFileMeta> {
+  const decoder = new TextDecoder()
+  const reader = file.stream().getReader()
+  let buffer = ''
+  let headerParsed = false
+  let transform: CityJsonTransform = {}
+  let info: ViewerDatasetInfo = { cityJsonVersion: null, transform: null, metadata: null }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      let newlineIndex: number
+      while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, newlineIndex).replace(/\r$/, '')
+        buffer = buffer.slice(newlineIndex + 1)
+
+        if (!hasNonWhitespace(line)) continue
+
+        if (!headerParsed) {
+          const header = JSON.parse(line) as CityJsonHeader
+          transform = header.transform ?? {}
+          info = extractDatasetInfo(header)
+          headerParsed = true
+          continue
+        }
+
+        const rawFeature = JSON.parse(line) as CityJsonFeature
+        if (rawFeature.type !== 'CityJSONFeature' || !rawFeature.CityObjects || !rawFeature.vertices) {
+          continue
+        }
+
+        const worldVertices = transformVerticesInPlace(rawFeature.vertices, transform)
+        const objects = Object.entries(rawFeature.CityObjects)
+        if (objects.length === 0) continue
+
+        const roots = objects.filter(([, object]) => !object.parents || object.parents.length === 0)
+        const rootEntry = objects.find(([id]) => id === rawFeature.id) ?? roots[0] ?? objects[0]
+        const [rootObjectId, rootObject] = rootEntry
+        const viewerFeature = createViewerFeature({
+          featureId: rawFeature.id ?? rootObjectId,
+          rootObjectId,
+          rootObject,
+          cityObjects: rawFeature.CityObjects,
+          vertices: worldVertices,
+        })
+
+        if (viewerFeature) {
+          await onFeature(viewerFeature)
+        }
+      }
+    }
+    // flush any remaining incomplete line (no trailing newline)
+    if (hasNonWhitespace(buffer) && headerParsed) {
+      try {
+        const rawFeature = JSON.parse(buffer) as CityJsonFeature
+        if (rawFeature.type === 'CityJSONFeature' && rawFeature.CityObjects && rawFeature.vertices) {
+          const worldVertices = transformVerticesInPlace(rawFeature.vertices, transform)
+          const objects = Object.entries(rawFeature.CityObjects)
+          if (objects.length > 0) {
+            const roots = objects.filter(([, obj]) => !obj.parents || obj.parents.length === 0)
+            const rootEntry = objects.find(([id]) => id === rawFeature.id) ?? roots[0] ?? objects[0]
+            const [rootObjectId, rootObject] = rootEntry
+            const viewerFeature = createViewerFeature({
+              featureId: rawFeature.id ?? rootObjectId,
+              rootObjectId,
+              rootObject,
+              cityObjects: rawFeature.CityObjects,
+              vertices: worldVertices,
+            })
+            if (viewerFeature) await onFeature(viewerFeature)
+          }
+        }
+      } catch {
+        // ignore malformed trailing line
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  return { cityJsonVersion: info.cityJsonVersion, cityJsonKind: 'CityJSONFeatures', transform: info.transform, metadata: info.metadata }
+}
+
 export function parseCityJsonSequence(text: string, sourceName: string): ViewerDataset {
   const lines = text.split(/\r?\n/)
   const headerLineIndex = lines.findIndex(hasNonWhitespace)

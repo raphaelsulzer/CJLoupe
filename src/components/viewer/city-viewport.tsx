@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useImperativeHandle, useRef } from 'react'
 import * as THREE from 'three'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
@@ -142,6 +142,19 @@ const FALLBACK_OBJECT_TYPE_COLORS: Record<Theme, readonly string[]> = {
   dark: ['#7f8b97', '#827b72', '#788a67', '#728b98', '#887c93'],
 }
 
+type SceneProxyData = Pick<ViewerDataset, 'extent' | 'center'> & { features: { length: number } }
+
+type IncrementalBuildState = {
+  batchItems: BatchBuildItem[]
+  proxyData: SceneProxyData
+}
+
+export type CityViewportHandle = {
+  beginSceneBuild(estimatedCenter: Vec3, estimatedTotalFeatures: number): void
+  addFeatureChunk(features: ViewerFeature[], runningExtent: ViewerDataset['extent'], totalFeatureCount: number): Promise<void>
+  finalizeSceneBuild(data: ViewerDataset): void
+}
+
 type CityViewportProps = {
   data: ViewerDataset | null
   cameraFocalLength: number
@@ -179,6 +192,8 @@ type CityViewportProps = {
   onVertexCommit: (featureId: string, vertices: Vec3[]) => void
   onViewportCenterChange: (center: Vec3 | null) => void
   onRebuildProgress: (progress: { current: number; total: number } | null) => void
+  onNeedsFileReload?: () => void
+  handleRef?: React.RefObject<CityViewportHandle | null>
   theme: Theme
 }
 
@@ -597,11 +612,16 @@ function CityViewport({
   onVertexCommit,
   onViewportCenterChange,
   onRebuildProgress,
+  onNeedsFileReload,
+  handleRef,
   theme,
 }: CityViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const runtimeRef = useRef<Runtime | null>(null)
   const fittedDatasetKeyRef = useRef<string | null>(null)
+  const prebuiltDataRef = useRef<ViewerDataset | null>(null)
+  const incrementalBuildStateRef = useRef<IncrementalBuildState | null>(null)
+  const onNeedsFileReloadRef = useRef(onNeedsFileReload)
   const dataRef = useRef<ViewerDataset | null>(data)
   const initialCameraFocalLengthRef = useRef(cameraFocalLength)
   const hideOccludedEditEdgesRef = useRef(hideOccludedEditEdges)
@@ -687,6 +707,145 @@ function CityViewport({
   useEffect(() => { showVertexGizmoRef.current = showVertexGizmo }, [showVertexGizmo])
   useEffect(() => { mobileInteractionRef.current = mobileInteraction }, [mobileInteraction])
   useEffect(() => { mobileSelectionModeRef.current = mobileSelectionMode }, [mobileSelectionMode])
+  useEffect(() => { onNeedsFileReloadRef.current = onNeedsFileReload }, [onNeedsFileReload])
+
+  useImperativeHandle(handleRef, () => ({
+    beginSceneBuild(estimatedCenter: Vec3, estimatedTotalFeatures: number) {
+      const runtime = runtimeRef.current
+      if (!runtime) return
+      disposeSceneContents(runtime)
+      runtime.shaderObjectIdsByObjectKey.clear()
+      runtime.nextShaderObjectId = 1
+      syncSemanticSurfaceSharedUniforms(runtime, { features: [] } as unknown as ViewerDataset)
+      runtime.featureDrafts = new Map()
+      const proxyData: SceneProxyData = {
+        features: { length: estimatedTotalFeatures },
+        extent: [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity],
+        center: estimatedCenter,
+      }
+      incrementalBuildStateRef.current = { batchItems: [], proxyData }
+    },
+
+    async addFeatureChunk(features: ViewerFeature[], runningExtent: ViewerDataset['extent'], totalFeatureCount: number) {
+      const runtime = runtimeRef.current
+      const state = incrementalBuildStateRef.current
+      if (!runtime || !state) return
+
+      state.proxyData.extent = runningExtent
+      state.proxyData.features = { length: totalFeatureCount }
+
+      const YIELD_EVERY = 500
+      const FLUSH_EVERY = 500
+      const selection = selectionRef.current
+
+      for (let i = 0; i < features.length; i++) {
+        if (i > 0 && i % YIELD_EVERY === 0) {
+          if (state.batchItems.length >= FLUSH_EVERY) {
+            buildSpatialBatches(runtime, state.proxyData as unknown as ViewerDataset, state.batchItems, selection)
+            state.batchItems.length = 0
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, 0))
+        }
+
+        const feature = features[i]
+        const draftVertices = runtime.featureDrafts.get(feature.id) ?? feature.vertices
+        const featureCenter: Vec3 = [
+          (feature.extent[0] + feature.extent[3]) * 0.5,
+          (feature.extent[1] + feature.extent[4]) * 0.5,
+          (feature.extent[2] + feature.extent[5]) * 0.5,
+        ]
+
+        // Register semantic surface types before building geometry so that
+        // fillSemanticSurfaceAttributes can assign non-zero IDs. Must iterate all
+        // geometries (not just the displayed one) to match syncSemanticSurfaceSharedUniforms.
+        for (const obj of feature.objects) {
+          for (const geom of obj.geometries) {
+            for (const surf of geom.semanticSurfaces) {
+              if (!surf) continue
+              const key = semanticSurfaceTypeKey(surf.type)
+              if (!runtime.semanticSurfaceTypeIds.has(key)) {
+                const nextId = runtime.semanticSurfaceTypeIds.size + 1
+                if (nextId < SEMANTIC_SURFACE_COLOR_SLOT_COUNT) {
+                  runtime.semanticSurfaceTypeIds.set(key, nextId)
+                }
+              }
+            }
+          }
+        }
+
+        for (const object of feature.objects) {
+          const objectGeometry = resolveDisplayedObjectGeometry(feature, object, selection)
+          if (!objectGeometry) continue
+
+          const nextObjectKey = viewerObjectKey(feature.id, object.id)
+          if (canBatchObject(runtime, feature, object, objectGeometry)) {
+            const blueprint = buildObjectGeometryBlueprint(
+              objectGeometry.polygons,
+              draftVertices,
+              featureCenter,
+              collectObjectErrorFaceIndices(feature.errors, object.id, objectGeometry.index, objectGeometry.sourceFaceIndices),
+            )
+            const geometry = buildUngroupedObjectGeometry(blueprint)
+            applyBatchGeometryAttributes(geometry, blueprint, runtime, objectGeometry, nextObjectKey)
+            geometry.computeBoundingBox()
+            state.batchItems.push({
+              key: nextObjectKey,
+              featureId: feature.id,
+              objectId: object.id,
+              objectType: object.type,
+              hasRenderableChildren: object.hasRenderableChildren,
+              geometryIndex: objectGeometry.index,
+              featureCenter,
+              baseColorLight: baseColorForType(object.type, 'light'),
+              baseColorDark: baseColorForType(object.type, 'dark'),
+              triangleFaceIndices: geometry.userData.triangleFaceIndices,
+              geometry,
+              tileKey: getBatchTileKey(featureCenter, state.proxyData as unknown as ViewerDataset),
+              vertexCount: geometry.getAttribute('position')?.count ?? 0,
+              indexCount: geometry.getIndex()?.count ?? 0,
+            })
+          } else {
+            addStandaloneObjectMesh(runtime, state.proxyData as unknown as ViewerDataset, feature, object, objectGeometry, draftVertices, featureCenter, nextObjectKey)
+          }
+        }
+      }
+
+      if (state.batchItems.length >= FLUSH_EVERY) {
+        buildSpatialBatches(runtime, state.proxyData as unknown as ViewerDataset, state.batchItems, selection)
+        state.batchItems.length = 0
+      }
+    },
+
+    finalizeSceneBuild(data: ViewerDataset) {
+      const runtime = runtimeRef.current
+      const state = incrementalBuildStateRef.current
+      if (!runtime || !state) return
+
+      if (state.batchItems.length > 0) {
+        buildSpatialBatches(runtime, state.proxyData as unknown as ViewerDataset, state.batchItems, selectionRef.current)
+        state.batchItems.length = 0
+      }
+      incrementalBuildStateRef.current = null
+
+      syncSemanticSurfaceSharedUniforms(runtime, data)
+      syncBatchedAttributeValueTexture(runtime, runtime.attributeColor)
+      onRebuildProgressRef.current(null)
+
+      const datasetKey = getDatasetViewKey(data)
+      if (fittedDatasetKeyRef.current !== datasetKey) {
+        fitCameraToDataset(runtime, data)
+        fittedDatasetKeyRef.current = datasetKey
+      }
+      rebuildAnnotations(runtime)
+      syncSelection(runtime, data, selectionRef.current, hideOccludedEditEdgesRef.current, isolateSelectedFeatureRef.current, showVertexGizmoRef.current)
+      previousSelectionRef.current = selectionRef.current
+      previousIsolateSelectedFeatureRef.current = isolateSelectedFeatureRef.current
+      renderViewport(runtime)
+      reportViewportCenter(runtime, data, onViewportCenterChangeRef.current)
+
+      prebuiltDataRef.current = data
+    },
+  }))
 
   useEffect(() => {
     const container = containerRef.current
@@ -1193,6 +1352,18 @@ function CityViewport({
       return
     }
 
+    if (prebuiltDataRef.current === data) {
+      prebuiltDataRef.current = null
+      // Scene was built imperatively — apply selection highlights and seed previousSelectionRef
+      // so that subsequent syncSelectionDelta calls start from the correct baseline.
+      const selection = selectionRef.current
+      syncSelection(runtime, data, selection, hideOccludedEditEdgesRef.current, isolateSelectedFeatureRef.current, showVertexGizmoRef.current)
+      previousSelectionRef.current = selection
+      previousIsolateSelectedFeatureRef.current = isolateSelectedFeatureRef.current
+      renderViewport(runtime)
+      return
+    }
+
     const signal = { cancelled: false }
     onRebuildProgressRef.current({ current: 0, total: data.features.length })
 
@@ -1244,6 +1415,10 @@ function CityViewport({
     previousActiveGeometryIndexRef.current = activeGeometryIndex
 
     if (displayModeChanged || activeGeometryChanged) {
+      if (currentData.features.length > 0 && currentData.features[0].vertices.length === 0) {
+        onNeedsFileReloadRef.current?.()
+        return
+      }
       const signal = { cancelled: false }
       onRebuildProgressRef.current({ current: 0, total: currentData.features.length })
       void rebuildScene(runtime, currentData, selectionRef.current, signal, (current, total) => {
@@ -1385,6 +1560,10 @@ function CityViewport({
       const selection = selectionRef.current
       const needsRebuild = shouldRebuildForSemanticModeToggle(runtime, currentData, selection, showSemanticSurfaces)
       if (needsRebuild) {
+        if (currentData.features.length > 0 && currentData.features[0].vertices.length === 0) {
+          onNeedsFileReloadRef.current?.()
+          return
+        }
         const signal = { cancelled: false }
         onRebuildProgressRef.current({ current: 0, total: currentData.features.length })
         void rebuildScene(runtime, currentData, selection, signal, (current, total) => {
@@ -2783,6 +2962,38 @@ function syncSelectionDelta(
   rebuildHandles(runtime, data, selection, hideOccludedEditEdges, showVertexGizmo)
 }
 
+function extractBatchedGeometryForOutline(
+  batch: THREE.BatchedMesh,
+  geometryId: number,
+): THREE.BufferGeometry | null {
+  const range = batch.getGeometryRangeAt(geometryId)
+  const posAttr = batch.geometry.getAttribute('position')
+  const indexAttr = batch.geometry.getIndex()
+  if (!posAttr || !indexAttr) return null
+
+  const { vertexStart, vertexCount, indexStart, indexCount } = range as {
+    vertexStart: number; vertexCount: number; indexStart: number; indexCount: number
+  }
+
+  const positions = new Float32Array(vertexCount * 3)
+  for (let i = 0; i < vertexCount; i++) {
+    positions[i * 3]     = posAttr.getX(vertexStart + i)
+    positions[i * 3 + 1] = posAttr.getY(vertexStart + i)
+    positions[i * 3 + 2] = posAttr.getZ(vertexStart + i)
+  }
+
+  const indexArray = indexAttr.array as Uint32Array | Int32Array
+  const indices = new Uint32Array(indexCount)
+  for (let i = 0; i < indexCount; i++) {
+    indices[i] = indexArray[indexStart + i] - vertexStart
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  geometry.setIndex(new THREE.BufferAttribute(indices, 1))
+  return geometry
+}
+
 function extractOutlineGeometrySubset(
   sourceGeometry: THREE.BufferGeometry,
   triangleFaceIndices: TriangleFaceIndices,
@@ -2857,9 +3068,15 @@ function syncSelectionOutlineProxy(
         : null
       const hasSelectedFace = isActiveSelection && selection.selectedFaceIndex != null && selectedFace != null
 
+      // Hoist lookups so shouldBuildOutline can consider batch/standalone availability
+      const standaloneMesh = runtime.meshesByObjectKey.get(objectKey)
+      const batchedRecord = runtime.batchedObjectsByObjectKey.get(objectKey)
+
+      // When geometry is released (polygons empty), batched/standalone meshes already
+      // have GPU geometry — allow them through so we can extract from the live mesh.
       const shouldBuildOutline = hasSelectedFace
         ? true
-        : sourcePolygons.length > 0
+        : sourcePolygons.length > 0 || standaloneMesh != null || batchedRecord != null
       if (!shouldBuildOutline) {
         continue
       }
@@ -2875,7 +3092,6 @@ function syncSelectionOutlineProxy(
         featureCenter[2] - data.center[2],
       )
 
-      const standaloneMesh = runtime.meshesByObjectKey.get(objectKey)
       if (standaloneMesh) {
         const sourceGeometry = standaloneMesh.geometry
         const triangleFaceIndices = standaloneMesh.userData.triangleFaceIndices
@@ -2909,48 +3125,57 @@ function syncSelectionOutlineProxy(
         continue
       }
 
-      const batchedRecord = runtime.batchedObjectsByObjectKey.get(objectKey)
       if (batchedRecord) {
-        const draftVertices = runtime.featureDrafts.get(feature.id) ?? feature.vertices
-        const blueprint = buildObjectGeometryBlueprint(
-          objectGeometry.polygons,
-          draftVertices,
-          featureCenter,
-          collectObjectErrorFaceIndices(
-            feature.errors,
-            object.id,
-            objectGeometry.index,
-            objectGeometry.sourceFaceIndices,
-          ),
-        )
+        if (sourcePolygons.length > 0) {
+          const draftVertices = runtime.featureDrafts.get(feature.id) ?? feature.vertices
+          const blueprint = buildObjectGeometryBlueprint(
+            objectGeometry.polygons,
+            draftVertices,
+            featureCenter,
+            collectObjectErrorFaceIndices(
+              feature.errors,
+              object.id,
+              objectGeometry.index,
+              objectGeometry.sourceFaceIndices,
+            ),
+          )
 
-        if (hasSelectedFace) {
-          const outlineGeometry = buildUngroupedObjectGeometry({
-            positions: blueprint.positions,
-            normals: blueprint.normals,
-            polygonTriangleIndices: [blueprint.polygonTriangleIndices[selection.selectedFaceIndex!]],
-          })
-          const outlineMesh = new THREE.Mesh(outlineGeometry, runtime.selectionOutlineSeedMaterial)
-          outlineMesh.position.copy(meshPosition)
-          runtime.selectionOutlineGroup.add(outlineMesh)
-
-          if (sourcePolygons.length > 1) {
-            const occluderPolygonIndices = blueprint.polygonTriangleIndices
-              .filter((_, index) => index !== selection.selectedFaceIndex)
-            const occluderGeometry = buildUngroupedObjectGeometry({
+          if (hasSelectedFace) {
+            const outlineGeometry = buildUngroupedObjectGeometry({
               positions: blueprint.positions,
               normals: blueprint.normals,
-              polygonTriangleIndices: occluderPolygonIndices,
+              polygonTriangleIndices: [blueprint.polygonTriangleIndices[selection.selectedFaceIndex!]],
             })
-            const occluderMesh = new THREE.Mesh(occluderGeometry, runtime.selectionOutlineDepthMaterial)
-            occluderMesh.position.copy(meshPosition)
-            runtime.selectionOutlineOccluderGroup.add(occluderMesh)
+            const outlineMesh = new THREE.Mesh(outlineGeometry, runtime.selectionOutlineSeedMaterial)
+            outlineMesh.position.copy(meshPosition)
+            runtime.selectionOutlineGroup.add(outlineMesh)
+
+            if (sourcePolygons.length > 1) {
+              const occluderPolygonIndices = blueprint.polygonTriangleIndices
+                .filter((_, index) => index !== selection.selectedFaceIndex)
+              const occluderGeometry = buildUngroupedObjectGeometry({
+                positions: blueprint.positions,
+                normals: blueprint.normals,
+                polygonTriangleIndices: occluderPolygonIndices,
+              })
+              const occluderMesh = new THREE.Mesh(occluderGeometry, runtime.selectionOutlineDepthMaterial)
+              occluderMesh.position.copy(meshPosition)
+              runtime.selectionOutlineOccluderGroup.add(occluderMesh)
+            }
+          } else {
+            const outlineGeometry = buildUngroupedObjectGeometry(blueprint)
+            const outlineMesh = new THREE.Mesh(outlineGeometry, runtime.selectionOutlineSeedMaterial)
+            outlineMesh.position.copy(meshPosition)
+            runtime.selectionOutlineGroup.add(outlineMesh)
           }
         } else {
-          const outlineGeometry = buildUngroupedObjectGeometry(blueprint)
-          const outlineMesh = new THREE.Mesh(outlineGeometry, runtime.selectionOutlineSeedMaterial)
-          outlineMesh.position.copy(meshPosition)
-          runtime.selectionOutlineGroup.add(outlineMesh)
+          // Geometry was released after GPU upload — extract positions directly from the BatchedMesh.
+          const outlineGeometry = extractBatchedGeometryForOutline(batchedRecord.batch, batchedRecord.geometryId)
+          if (outlineGeometry) {
+            const outlineMesh = new THREE.Mesh(outlineGeometry, runtime.selectionOutlineSeedMaterial)
+            outlineMesh.position.copy(meshPosition)
+            runtime.selectionOutlineGroup.add(outlineMesh)
+          }
         }
       }
     }
