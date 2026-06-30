@@ -38,7 +38,6 @@ const VIEWPORT_FOG_DENSITY = {
 } as const
 
 const PLANARITY_DISTANCE_TOLERANCE = 0.0001
-const PLANARITY_RELATIVE_TOLERANCE = 1e-7
 const NON_PLANAR_NORMAL_EXTRA_VERTEX_RATIO = 0.1
 const NON_PLANAR_NORMAL_EXTRA_VERTEX_MIN_BUDGET = 10000
 const NON_PLANAR_NORMAL_EXTRA_VERTEX_MAX_BUDGET = 500000
@@ -1245,16 +1244,23 @@ function CityViewport({
     previousActiveGeometryIndexRef.current = activeGeometryIndex
 
     if (displayModeChanged || activeGeometryChanged) {
-      rebuildScene(runtime, currentData, selectionRef.current)
-      rebuildAnnotations(runtime)
-      syncSelection(
-        runtime,
-        currentData,
-        selectionRef.current,
-        hideOccludedEditEdgesRef.current,
-        isolateSelectedFeatureRef.current,
-        showVertexGizmoRef.current,
-      )
+      const signal = { cancelled: false }
+      onRebuildProgressRef.current({ current: 0, total: currentData.features.length })
+      void rebuildScene(runtime, currentData, selectionRef.current, signal, (current, total) => {
+        onRebuildProgressRef.current({ current, total })
+      }).then(() => {
+        if (signal.cancelled) return
+        onRebuildProgressRef.current(null)
+        rebuildAnnotations(runtime)
+        syncSelection(
+          runtime,
+          currentData,
+          selectionRef.current,
+          hideOccludedEditEdgesRef.current,
+          isolateSelectedFeatureRef.current,
+          showVertexGizmoRef.current,
+        )
+      })
     } else {
       const selection = selectionRef.current
       if (selection.selectedFeatureId) {
@@ -1379,8 +1385,15 @@ function CityViewport({
       const selection = selectionRef.current
       const needsRebuild = shouldRebuildForSemanticModeToggle(runtime, currentData, selection, showSemanticSurfaces)
       if (needsRebuild) {
-        rebuildScene(runtime, currentData, selection)
-        rebuildAnnotations(runtime)
+        const signal = { cancelled: false }
+        onRebuildProgressRef.current({ current: 0, total: currentData.features.length })
+        void rebuildScene(runtime, currentData, selection, signal, (current, total) => {
+          onRebuildProgressRef.current({ current, total })
+        }).then(() => {
+          if (signal.cancelled) return
+          onRebuildProgressRef.current(null)
+          rebuildAnnotations(runtime)
+        })
       } else {
         syncSemanticSurfaceSharedUniforms(runtime, currentData)
         syncBatchMaterials(runtime)
@@ -1555,7 +1568,7 @@ async function rebuildScene(
   const batchItems: BatchBuildItem[] = []
 
   const total = data.features.length
-  const YIELD_EVERY = 20
+  const YIELD_EVERY = 500
   const FLUSH_EVERY = 500
 
   for (let featureIndex = 0; featureIndex < total; featureIndex++) {
@@ -2289,7 +2302,7 @@ function buildObjectGeometryBlueprint(
   center: Vec3,
   triangleNormalFaceIndices: ReadonlySet<number> = EMPTY_FACE_INDEX_SET,
 ): ObjectGeometryBlueprint {
-  let vertexCapacity = countRenderablePolygonVertices(polygons, vertices)
+  let vertexCapacity = countRenderablePolygonVertices(polygons)
   let positions = new Float32Array(vertexCapacity * 3)
   let normals = new Float32Array(vertexCapacity * 3)
   const polygonTriangleIndices: number[][] = []
@@ -2327,7 +2340,7 @@ function buildObjectGeometryBlueprint(
       !hasClosingDuplicateVertex(sourcePolygon[0], vertices)
     ) {
       const ring = sourcePolygon[0]
-      const polygonVertexCount = countRenderableRingVertices(ring, vertices)
+      const polygonVertexCount = ring.length
       if (polygonVertexCount < 3) {
         polygonTriangleIndices.push([])
         continue
@@ -2460,37 +2473,18 @@ function collectRingOffsets(rings: Vec3[][]) {
   return ringOffsets
 }
 
-function countRenderablePolygonVertices(polygons: PolygonRings[], vertices: Vec3[]) {
+function countRenderablePolygonVertices(polygons: PolygonRings[]) {
   let count = 0
-
   for (const polygon of polygons) {
-    let polygonCount = 0
     for (const ring of polygon) {
-      let ringCount = 0
-      for (const index of ring) {
-        if (Array.isArray(vertices[index])) {
-          ringCount += 1
-        }
+      if (ring.length >= 3) {
+        count += ring.length
       }
-      if (ringCount >= 3) {
-        polygonCount += ringCount
-      }
-    }
-    count += polygonCount
-  }
-
-  return count
-}
-
-function countRenderableRingVertices(ring: number[], vertices: Vec3[]) {
-  let count = 0
-  for (const index of ring) {
-    if (Array.isArray(vertices[index])) {
-      count += 1
     }
   }
   return count
 }
+
 
 function collectRingVertices(ring: number[], vertices: Vec3[]) {
   const ringVertices: Vec3[] = []
@@ -4018,28 +4012,15 @@ function isNonPlanarPolygon(rings: Vec3[][], normal: THREE.Vector3) {
     return false
   }
 
-  let maxDistanceSquared = 0
-  for (const ring of rings) {
-    for (const vertex of ring) {
-      const dx = vertex[0] - origin[0]
-      const dy = vertex[1] - origin[1]
-      const dz = vertex[2] - origin[2]
-      maxDistanceSquared = Math.max(maxDistanceSquared, dx * dx + dy * dy + dz * dz)
-    }
-  }
-
-  const tolerance = Math.max(
-    PLANARITY_DISTANCE_TOLERANCE,
-    Math.sqrt(maxDistanceSquared) * PLANARITY_RELATIVE_TOLERANCE,
-  )
-
+  // Single pass with fixed tolerance — relative tolerance only differs for polygons >1000m wide,
+  // which don't occur in typical city data.
   for (const ring of rings) {
     for (const vertex of ring) {
       const signedDistance =
         (vertex[0] - origin[0]) * normal.x +
         (vertex[1] - origin[1]) * normal.y +
         (vertex[2] - origin[2]) * normal.z
-      if (Math.abs(signedDistance) > tolerance) {
+      if (Math.abs(signedDistance) > PLANARITY_DISTANCE_TOLERANCE) {
         return true
       }
     }
